@@ -1,0 +1,15 @@
+# Godot 4 generated files
+.godot/
+*.uid
+
+# Android export
+android/build/
+*.apk
+*.aab
+
+# Editor settings (optional — uncomment to exclude)
+# .godot/editor/
+
+# OS files
+.DS_Store
+Thumbs.db

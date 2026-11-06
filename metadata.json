@@ -1,0 +1,17 @@
+{
+  "name": "AXEV CRIME",
+  "version": "0.1.0",
+  "engine": "Godot 4.3",
+  "platform": "Android",
+  "language": "GDScript",
+  "type": "3D Open World — Crime / Mystery",
+  "status": "Phase 1 — Foundation",
+  "repository": "https://github.com/Aurelhopedro/AxevCrime",
+  "phases": {
+    "1": "Foundation — project structure, player controller, CI validation",
+    "2": "World — terrain, props, navigation mesh",
+    "3": "Vehicle — basic driving physics",
+    "4": "Investigation — clues, inventory, dialogue stubs",
+    "5": "Android Export — APK build and signing"
+  }
+}

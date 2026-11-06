@@ -8,68 +8,205 @@ on:
 
 jobs:
   validate:
-    name: Godot 4 — Headless Validation
+    name: Godot 4.3 — Headless Validation
     runs-on: ubuntu-22.04
     timeout-minutes: 15
 
     steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      # ── 2. Install system dependencies ────────────────────────────────────
+      - name: Install system dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            wget unzip xvfb \
+            wget unzip \
             libgl1 libgles2 \
             libfontconfig1 libxrandr2 libxinerama1 libxcursor1 libxi6
 
-      - name: Download Godot 4.3 (Linux headless)
+      # ── 3. Download Godot 4.3 headless ────────────────────────────────────
+      - name: Download Godot 4.3-stable (Linux x86_64)
         run: |
-          wget -q "https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip" \
+          wget --quiet --show-progress \
+            "https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip" \
             -O /tmp/godot.zip
-          unzip -q /tmp/godot.zip -d /tmp/godot
-          chmod +x /tmp/godot/Godot_v4.3-stable_linux.x86_64
-          sudo mv /tmp/godot/Godot_v4.3-stable_linux.x86_64 /usr/local/bin/godot
+          unzip -q /tmp/godot.zip -d /tmp/godot_bin
+          chmod +x /tmp/godot_bin/Godot_v4.3-stable_linux.x86_64
+          sudo mv /tmp/godot_bin/Godot_v4.3-stable_linux.x86_64 /usr/local/bin/godot
+          godot --version
 
-      - name: Validate project.godot exists and is readable
+      # ── 4. Verify required files exist ────────────────────────────────────
+      - name: Verify required project files
         run: |
-          echo "=== project.godot ==="
-          cat project.godot
+          set -euo pipefail
+          MISSING=0
 
-      - name: Import project (headless — detects config errors)
-        run: |
-          timeout 60 godot --headless --path . --quit 2>&1 || true
-          echo "Headless import completed."
+          check_file() {
+            if [ ! -f "$1" ]; then
+              echo "MISSING: $1"
+              MISSING=$((MISSING + 1))
+            else
+              echo "OK:      $1"
+            fi
+          }
 
-      - name: Check scene files exist
-        run: |
-          echo "=== Scene files ==="
-          find scenes/ -name "*.tscn" | sort
-          if [ -z "$(find scenes/ -name '*.tscn')" ]; then
-            echo "WARNING: No .tscn scene files found."
+          check_file "project.godot"
+          check_file "scenes/main.tscn"
+          check_file "scenes/player.tscn"
+          check_file "scripts/main.gd"
+          check_file "scripts/player_controller.gd"
+          check_file "assets/icon.svg"
+
+          if [ "$MISSING" -gt 0 ]; then
+            echo "ERROR: $MISSING required file(s) missing."
+            exit 1
           fi
 
-      - name: Check script files exist
+      # ── 5. Validate project.godot structure ───────────────────────────────
+      - name: Validate project.godot
         run: |
-          echo "=== GDScript files ==="
-          find scripts/ -name "*.gd" | sort
+          set -euo pipefail
 
-      - name: Validate GDScript syntax (parse only)
+          # Must declare Godot 4 config version
+          grep -q "^config_version=5" project.godot \
+            || { echo "ERROR: project.godot missing config_version=5"; exit 1; }
+
+          # Must declare main scene
+          grep -q 'run/main_scene=' project.godot \
+            || { echo "ERROR: project.godot missing run/main_scene"; exit 1; }
+
+          # Must target Godot 4.x
+          grep -q '"4\.' project.godot \
+            || { echo "ERROR: project.godot missing Godot 4.x feature tag"; exit 1; }
+
+          echo "project.godot: structure OK"
+
+      # ── 6. Validate .tscn references are internally consistent ────────────
+      - name: Validate scene file integrity
         run: |
-          for f in $(find scripts/ -name "*.gd"); do
-            echo "Checking: $f"
-            timeout 30 godot --headless --path . --script "$f" --quit 2>&1 || true
+          set -euo pipefail
+          ERRORS=0
+
+          validate_tscn() {
+            local file="$1"
+            echo "--- $file ---"
+
+            # format=3 is Godot 4 text scene format
+            if ! grep -q "^format=3" "$file"; then
+              echo "ERROR: $file does not use Godot 4 scene format (format=3)"
+              ERRORS=$((ERRORS + 1))
+            fi
+
+            # Every ext_resource must reference a file that exists in the repo
+            grep 'path="res://' "$file" | while read -r line; do
+              local res_path
+              res_path=$(echo "$line" | grep -oP 'path="res://\K[^"]+')
+              if [ -n "$res_path" ] && [ ! -f "$res_path" ]; then
+                echo "ERROR: $file references missing resource: $res_path"
+                # Write to temp file because subshell can't update ERRORS
+                echo "1" >> /tmp/tscn_errors
+              else
+                echo "OK:    res://$res_path"
+              fi
+            done
+
+            # Every sub_resource used must be declared
+            used=$(grep -oP 'SubResource\("\K[^"]+' "$file" | sort -u)
+            declared=$(grep -oP '^\[sub_resource.*id="\K[^"]+' "$file" | sort -u)
+            while IFS= read -r id; do
+              if [ -z "$id" ]; then continue; fi
+              if ! echo "$declared" | grep -qx "$id"; then
+                echo "ERROR: $file uses undeclared sub_resource id: $id"
+                echo "1" >> /tmp/tscn_errors
+              fi
+            done <<< "$used"
+          }
+
+          rm -f /tmp/tscn_errors
+          validate_tscn "scenes/main.tscn"
+          validate_tscn "scenes/player.tscn"
+
+          if [ -f /tmp/tscn_errors ]; then
+            echo "ERROR: scene integrity check failed."
+            exit 1
+          fi
+          echo "Scene integrity: OK"
+
+      # ── 7. Import project headless — capture and inspect output ───────────
+      - name: Import project (headless — fail on Godot errors)
+        run: |
+          set -euo pipefail
+
+          # Run Godot headless import; capture all output including stderr
+          # Godot exits 0 even on some errors, so we inspect the log too
+          GODOT_LOG=$(timeout 90 godot --headless --path . --quit --verbose 2>&1) || GODOT_EXIT=$?
+          GODOT_EXIT=${GODOT_EXIT:-0}
+
+          echo "=== Godot output ==="
+          echo "$GODOT_LOG"
+          echo "=== Exit code: $GODOT_EXIT ==="
+
+          # Fail on non-zero exit
+          if [ "$GODOT_EXIT" -ne 0 ]; then
+            echo "ERROR: Godot exited with code $GODOT_EXIT"
+            exit 1
+          fi
+
+          # Fail if Godot reported a parse error or crashed
+          if echo "$GODOT_LOG" | grep -qiE "^ERROR:|SCRIPT ERROR:|Parse Error:|Unexpected token|Failed to load"; then
+            echo "ERROR: Godot reported errors during import."
+            exit 1
+          fi
+
+          echo "Godot import: OK"
+
+      # ── 8. Verify scripts are referenced and not orphaned ─────────────────
+      - name: Verify script–scene cross-references
+        run: |
+          set -euo pipefail
+          ERRORS=0
+
+          # Every .gd in scripts/ must be referenced by at least one .tscn
+          for script in scripts/*.gd; do
+            script_res="res://$script"
+            if ! grep -rl "\"$script_res\"" scenes/ > /dev/null 2>&1; then
+              echo "WARNING: $script is not referenced by any scene."
+              # Warning only — orphaned scripts are allowed during development
+            else
+              echo "OK: $script referenced in scenes/"
+            fi
           done
-          echo "Syntax check pass complete."
 
-      - name: Summary
+          # Every script path referenced in scenes must exist on disk
+          grep -rh 'path="res://scripts/' scenes/ | \
+            grep -oP 'path="res://\K[^"]+' | sort -u | while read -r ref; do
+            if [ ! -f "$ref" ]; then
+              echo "ERROR: Scene references missing script: $ref"
+              echo "1" >> /tmp/ref_errors
+            else
+              echo "OK: $ref exists"
+            fi
+          done
+
+          if [ -f /tmp/ref_errors ]; then
+            exit 1
+          fi
+
+      # ── 9. Summary ────────────────────────────────────────────────────────
+      - name: Validation summary
         run: |
           echo ""
-          echo "============================================"
+          echo "=============================================="
           echo "  AXEV CRIME — Validation Summary"
-          echo "============================================"
-          echo "  project.godot : OK"
-          echo "  Scenes        : $(find scenes/ -name '*.tscn' | wc -l) file(s)"
-          echo "  Scripts       : $(find scripts/ -name '*.gd' | wc -l) file(s)"
-          echo "============================================"
+          echo "=============================================="
+          echo "  project.godot  : OK (config_version=5, Godot 4.3)"
+          echo "  Scenes (.tscn) : $(find scenes/ -name '*.tscn' | wc -l | tr -d ' ') file(s)"
+          find scenes/ -name "*.tscn" | sed 's/^/    - /'
+          echo "  Scripts (.gd)  : $(find scripts/ -name '*.gd' | wc -l | tr -d ' ') file(s)"
+          find scripts/ -name "*.gd" | sed 's/^/    - /'
+          echo "  Input actions  : $(grep -c '^\w.*={$' project.godot || echo 0) defined"
+          echo "=============================================="
+          echo "  All checks passed."
+          echo "=============================================="

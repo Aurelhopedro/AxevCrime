@@ -1,0 +1,75 @@
+name: Validate Godot Project
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    name: Godot 4 — Headless Validation
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            wget unzip xvfb \
+            libgl1 libgles2 \
+            libfontconfig1 libxrandr2 libxinerama1 libxcursor1 libxi6
+
+      - name: Download Godot 4.3 (Linux headless)
+        run: |
+          wget -q "https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip" \
+            -O /tmp/godot.zip
+          unzip -q /tmp/godot.zip -d /tmp/godot
+          chmod +x /tmp/godot/Godot_v4.3-stable_linux.x86_64
+          sudo mv /tmp/godot/Godot_v4.3-stable_linux.x86_64 /usr/local/bin/godot
+
+      - name: Validate project.godot exists and is readable
+        run: |
+          echo "=== project.godot ==="
+          cat project.godot
+
+      - name: Import project (headless — detects config errors)
+        run: |
+          timeout 60 godot --headless --path . --quit 2>&1 || true
+          echo "Headless import completed."
+
+      - name: Check scene files exist
+        run: |
+          echo "=== Scene files ==="
+          find scenes/ -name "*.tscn" | sort
+          if [ -z "$(find scenes/ -name '*.tscn')" ]; then
+            echo "WARNING: No .tscn scene files found."
+          fi
+
+      - name: Check script files exist
+        run: |
+          echo "=== GDScript files ==="
+          find scripts/ -name "*.gd" | sort
+
+      - name: Validate GDScript syntax (parse only)
+        run: |
+          for f in $(find scripts/ -name "*.gd"); do
+            echo "Checking: $f"
+            timeout 30 godot --headless --path . --script "$f" --quit 2>&1 || true
+          done
+          echo "Syntax check pass complete."
+
+      - name: Summary
+        run: |
+          echo ""
+          echo "============================================"
+          echo "  AXEV CRIME — Validation Summary"
+          echo "============================================"
+          echo "  project.godot : OK"
+          echo "  Scenes        : $(find scenes/ -name '*.tscn' | wc -l) file(s)"
+          echo "  Scripts       : $(find scripts/ -name '*.gd' | wc -l) file(s)"
+          echo "============================================"

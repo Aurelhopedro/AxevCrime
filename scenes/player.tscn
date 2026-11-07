@@ -1,38 +1,47 @@
-[gd_scene load_steps=4 format=3 uid="uid://player_scene"]
+[gd_scene load_steps=5 format=3 uid="uid://player_scene"]
 
 [ext_resource type="Script" path="res://scripts/player_controller.gd" id="1_player"]
 [ext_resource type="PackedScene" path="res://scenes/touch_ui.tscn" id="2_touch_ui"]
+[ext_resource type="PackedScene" path="res://assets/models/character/protagonist/The_Soldier.glb" id="3_soldier"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_1"]
 radius = 0.4
 height = 1.8
 
 ;; ==========================================================================
-;; AXEV CRIME — Player Scene
+;; AXEV CRIME — Player Scene  (Fase 3 — The_Soldier.glb integrado)
 ;; ==========================================================================
 ;;
-;; HIERARQUIA ESPERADA (após integração dos GLBs Quaternius):
+;; HIERARQUIA ACTUAL:
 ;;
 ;; Player (CharacterBody3D)
-;; ├── CollisionShape3D        — cápsula de colisão, NÃO mexer
-;; ├── CharacterMesh (Node3D)  — pivot de rotação; recebe o GLB do personagem
-;; │   └── [character.glb]     — Universal Base Characters (Regular Male)
-;; │       └── Skeleton3D      — esqueleto humanoid retargetado
-;; ├── AnimationRoot (Node3D)  — GLB da biblioteca de animações (separado)
-;; │   └── [animations.glb]    — Universal Animation Library 1 (Standard)
-;; │       └── AnimationPlayer — fonte das animações (retargetadas para o char)
+;; ├── CollisionShape3D        — cápsula radius=0.4 height=1.8, NÃO mexer
+;; ├── CharacterMesh (Node3D)  — pivot de rotação; contém o GLB do personagem
+;; │   └── The_Soldier         — The_Soldier.glb instanciado
+;; │       └── [Skeleton3D + AnimationPlayer se incorporados no GLB]
+;; ├── AnimationRoot (Node3D)  — reservado para biblioteca de animações externa
+;; │   └── [animations.glb quando disponível]
 ;; ├── CameraPivot (Node3D)
 ;; │   └── Camera3D
 ;; └── TouchUI (instância)
 ;;
-;; PASSOS DE INTEGRAÇÃO (ver assets/models/character/README.md):
-;; 1. Descarregar e colocar os GLBs em assets/models/character/
-;; 2. Importar em Godot com retargeting humanoid activo
-;; 3. Arrastar character.glb para CharacterMesh
-;; 4. Arrastar animations.glb para AnimationRoot
-;; 5. O player_controller.gd detecta tudo automaticamente
+;; NOTAS DE POSICIONAMENTO:
+;;   - CapsuleShape3D origin.y = 0.9  (centro da cápsula a meio da altura)
+;;   - The_Soldier origin.y = -0.9    (alinha base do modelo com y=0 do Player)
+;;   - Se o modelo flutuar: reduzir origin.y (ex: -0.95)
+;;   - Se o modelo ficar enterrado: aumentar origin.y (ex: -0.85)
+;;   - Se o modelo for gigante (pack em cm): escala (0.01, 0.01, 0.01)
 ;;
-;; O jogo funciona sem os GLBs (personagem invisível, lógica intacta).
+;; ANIMAÇÕES:
+;;   O player_controller.gd detecta AnimationPlayer automaticamente:
+;;   1º em AnimationRoot, 2º em CharacterMesh (GLB com anims incorporadas).
+;;   Se The_Soldier.glb tiver AnimationPlayer interno, é usado directamente.
+;;   Nomes esperados: Idle, Walk, Jog, Sprint, Jump, Fall, Land
+;;   (ou com prefixo "Armature|" — tratado automaticamente pelo script)
+;;
+;; PRESERVADO (NÃO ALTERADO):
+;;   player_controller.gd, touch_ui.tscn, main.tscn, main.gd
+;;   Sistema de movimento, joystick, câmara, colisão, botões
 ;; ==========================================================================
 
 [node name="Player" type="CharacterBody3D"]
@@ -44,6 +53,13 @@ shape = SubResource("CapsuleShape3D_1")
 
 [node name="CharacterMesh" type="Node3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+
+;; The_Soldier.glb instanciado como filho de CharacterMesh.
+;; origin.y = -0.9: compensa o centro da cápsula (height/2 = 0.9)
+;; para que a base do modelo fique em y=0 (nível do chão).
+;; Escala (1,1,1): assume modelo em metros. Se gigante, usar (0.01, 0.01, 0.01).
+[node name="The_Soldier" parent="CharacterMesh" instance=ExtResource("3_soldier")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.9, 0)
 
 [node name="AnimationRoot" type="Node3D" parent="."]
 visible = false

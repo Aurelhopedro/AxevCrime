@@ -1,0 +1,106 @@
+name: Download Quaternius Character
+
+## Descarrega o personagem CC0 do pack Quaternius Ultimate Modular Characters
+## e faz commit do GLB em assets/models/character/
+##
+## Executar MANUALMENTE uma vez para popular o repositório com o modelo.
+## Depois disso o Android build workflow usará o GLB já commitado.
+##
+## Como usar:
+##   GitHub → Actions → "Download Quaternius Character" → Run workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Escreve "sim" para confirmar o download e commit do GLB CC0'
+        required: true
+        default: ''
+
+jobs:
+  download-character:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm == 'sim'
+
+    steps:
+      - name: Checkout repositório
+        uses: actions/checkout@v4
+
+      - name: Criar pasta de destino
+        run: mkdir -p assets/models/character
+
+      ## ----------------------------------------------------------------
+      ## O pack Quaternius Ultimate Modular Characters está disponível em:
+      ## https://quaternius.com/packs/ultimatemodularcharacters.html
+      ##
+      ## O ficheiro DamagedHelmet.glb abaixo é um placeholder de teste
+      ## (KhronosGroup, CC0). Substituir o URL pelo GLB Quaternius real
+      ## após descarregar o pack e alojar o GLB num URL público (ex: Releases).
+      ##
+      ## SUBSTITUIR ESTE URL pelo teu GLB Quaternius:
+      ## ----------------------------------------------------------------
+      - name: Verificar se GLB Quaternius já existe em Releases
+        id: check_release
+        run: |
+          # Tentar descarregar o GLB de uma release do próprio repositório
+          HTTP_CODE=$(curl -s -o assets/models/character/character.glb \
+            -w "%{http_code}" \
+            "https://github.com/${{ github.repository }}/releases/download/assets/character.glb")
+          echo "http_code=$HTTP_CODE" >> $GITHUB_OUTPUT
+
+      - name: Aviso se GLB não encontrado em Releases
+        if: steps.check_release.outputs.http_code != '200'
+        run: |
+          rm -f assets/models/character/character.glb
+          echo "⚠️  GLB não encontrado em Releases."
+          echo ""
+          echo "PASSOS PARA ADICIONAR O MODELO QUATERNIUS:"
+          echo "1. Descarrega o pack em: https://quaternius.com/packs/ultimatemodularcharacters.html"
+          echo "2. Extrai o ficheiro GLB com animações (ex: AnimatedCharacter.glb)"
+          echo "3. No GitHub: Releases → Edit → Upload Assets → faz upload como 'character.glb'"
+          echo "4. Volta a correr este workflow"
+          echo ""
+          echo "O jogo funciona sem o GLB (personagem invisível mas controlável)."
+
+      - name: Criar README na pasta do modelo
+        run: |
+          cat > assets/models/character/README.md << 'EOF'
+          # Modelo do Personagem — AXEV CRIME
+
+          ## Fonte
+          **Quaternius Ultimate Modular Characters** — https://quaternius.com/packs/ultimatemodularcharacters.html
+          Licença: **CC0 (domínio público)**
+
+          ## Como integrar o GLB em Godot 4.3
+          1. Coloca `character.glb` nesta pasta.
+          2. Abre o projecto em Godot 4.3.
+          3. No FileSystem, faz duplo clique em `character.glb` → confirma importação.
+          4. Abre `scenes/player.tscn`.
+          5. No SceneTree, clica em `CharacterMesh`.
+          6. Arrasta `character.glb` do FileSystem para dentro de `CharacterMesh` como filho.
+          7. O `player_controller.gd` detecta automaticamente o `AnimationPlayer`.
+
+          ## Escala esperada
+          O personagem deve ficar com ~1.8m de altura.
+          Se parecer gigante ou anão, selecciona o nó raiz do GLB e ajusta:
+          - Transform → Scale → (0.01, 0.01, 0.01) se vier em centímetros
+          - Transform → Scale → (1, 1, 1) se já estiver em metros
+
+          ## Animações esperadas
+          O `player_controller.gd` procura estas animações (nomes Quaternius):
+          - `Idle`
+          - `Walk`
+          - `Run`
+          - `Jump`
+
+          Se o teu GLB usar prefixo (ex: `Armature|Walk`), o script tenta
+          automaticamente o prefixo `Armature|`.
+          EOF
+
+      - name: Commit do README (e do GLB se descarregado)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add assets/models/character/
+          git diff --cached --quiet || git commit -m "feat: adicionar pasta do modelo Quaternius + README de integração"
+          git push

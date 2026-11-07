@@ -1,0 +1,77 @@
+name: Remove GODOT_AUDIT_TEMP
+
+# ============================================================================
+# AXEV CRIME — Remove a pasta GODOT_AUDIT_TEMP do repositório.
+#
+# Esta pasta foi criada pelo workflow godot-audit-collect.yml e contém
+# um ficheiro project.godot que confunde o Godot durante a importação,
+# gerando o aviso:
+#   "Detected another project.godot at res://GODOT_AUDIT_TEMP"
+#
+# EXECUÇÃO: manual (workflow_dispatch)
+# PROTECÇÃO: só remove GODOT_AUDIT_TEMP — não toca em mais nada
+# ============================================================================
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  remove-audit-temp:
+    name: Remover GODOT_AUDIT_TEMP do repositório
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repositório
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verificar se GODOT_AUDIT_TEMP existe
+        id: check
+        run: |
+          if [[ -d "GODOT_AUDIT_TEMP" ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Pasta GODOT_AUDIT_TEMP encontrada — será removida"
+            echo "Conteúdo:"
+            find GODOT_AUDIT_TEMP -type f | sort
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "GODOT_AUDIT_TEMP não existe no repositório — nada a fazer"
+          fi
+
+      - name: Remover GODOT_AUDIT_TEMP via git rm
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git rm -r --force GODOT_AUDIT_TEMP/
+          git commit -m "fix: remover GODOT_AUDIT_TEMP — evita conflito de project.godot na importação"
+          git push
+
+          echo "✓ GODOT_AUDIT_TEMP removida com sucesso"
+          echo "  O .gitignore já foi actualizado para prevenir que esta pasta"
+          echo "  volte a entrar no repositório em futuras auditorias."
+
+      - name: Confirmar remoção
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          if [[ -d "GODOT_AUDIT_TEMP" ]]; then
+            echo "::error::GODOT_AUDIT_TEMP ainda presente após remoção"
+            exit 1
+          else
+            echo "✓ GODOT_AUDIT_TEMP confirmada como ausente"
+          fi
+
+      - name: Sumário
+        if: always()
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  AXEV CRIME — Remoção de GODOT_AUDIT_TEMP"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  .gitignore: GODOT_AUDIT_TEMP/ ignorada ✓"
+          echo "  Próximo passo: executar validate-phase32.yml"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

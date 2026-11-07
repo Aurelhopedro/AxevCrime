@@ -1,4 +1,4 @@
-[gd_scene load_steps=5 format=3 uid="uid://player_scene"]
+[gd_scene load_steps=4 format=3 uid="uid://player_scene"]
 
 [ext_resource type="Script" path="res://scripts/player_controller.gd" id="1_player"]
 [ext_resource type="PackedScene" path="res://scenes/touch_ui.tscn" id="2_touch_ui"]
@@ -7,9 +7,13 @@
 radius = 0.4
 height = 1.8
 
-[sub_resource type="CapsuleMesh" id="CapsuleMesh_1"]
-radius = 0.4
-height = 1.8
+;; ---------------------------------------------------------------------------
+;; NOTA: O CapsuleMesh provisório foi removido.
+;; O nó CharacterMesh abaixo é o ponto de montagem para o GLB Quaternius.
+;; Enquanto o GLB não estiver presente, o jogador é invisível mas funcional.
+;; Quando o GLB for importado em Godot, arrastar o nó raiz do GLB para dentro
+;; de CharacterMesh como filho — o AnimationPlayer ficará em CharacterMesh/[GLB].
+;; ---------------------------------------------------------------------------
 
 [node name="Player" type="CharacterBody3D"]
 script = ExtResource("1_player")
@@ -18,9 +22,8 @@ script = ExtResource("1_player")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
 shape = SubResource("CapsuleShape3D_1")
 
-[node name="Mesh" type="MeshInstance3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
-mesh = SubResource("CapsuleMesh_1")
+[node name="CharacterMesh" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
 
 [node name="CameraPivot" type="Node3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)

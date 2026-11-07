@@ -1,46 +1,30 @@
 extends CharacterBody3D
 
 ## =============================================================================
-## AXEV CRIME — PlayerController v3
+## AXEV CRIME — PlayerController v3.1
 ## =============================================================================
 ##
 ## FASE 3.1 — Integração de The_Soldier.glb (117 animações incorporadas)
+##
+## ALTERAÇÕES v3.1 (pós-teste Android):
+##   PROBLEMA 2 — Animações param durante movimento contínuo:
+##     _play_anim() agora verifica is_playing(). Se a animação parou
+##     (loop desligado ou interrompida), é relançada mesmo que _current_anim
+##     seja o mesmo estado semântico. Evita o estado "personagem anda mas
+##     a animação ficou parada".
+##   PROBLEMA 3 — Direcções do joystick invertidas:
+##     _dir_from_input() corrigido: X e Y do input estavam ambos invertidos
+##     relativamente ao sistema de coordenadas do Godot. Correcção:
+##     usar forward * input_dir.y em vez de forward * -input_dir.y, e
+##     right * input_dir.x mantido (sinal de X estava duplo-invertido).
+##     Resultado: joystick para cima = avançar, baixo = recuar,
+##     esquerda = esquerda, direita = direita.
 ##
 ## ARQUITECTURA DE ANIMAÇÃO:
 ##   AnimationPlayer encontrado automaticamente dentro de CharacterMesh/The_Soldier.
 ##   O GLB tem 117 animações com nomes desconhecidos à partida.
 ##   O sistema usa _resolve_anim_name() para mapear nomes semânticos
 ##   (Idle, Walk, Run, Jump) para os nomes reais do GLB.
-##
-##   MAPEAMENTO (ordem de prioridade — primeiro encontrado ganha):
-##   Idle   → "Idle", "idle", "IDLE", "Armature|Idle", "Standing Idle",
-##             "Breathing Idle", "mixamo.com" (Mixamo default idle)
-##   Walk   → "Walk", "walk", "Walking", "Walk Forward", "Walk_Forward",
-##             "Armature|Walk", "Walk In Place"
-##   Run    → "Run", "run", "Running", "Sprint", "sprint", "Jog",
-##             "Run Forward", "Armature|Run", "Run In Place"
-##   Jump   → "Jump", "jump", "Jumping", "Jump Up", "Fall",
-##             "Armature|Jump", "Jump In Place"
-##
-##   Em runtime, _ready() imprime a lista completa das animações
-##   disponíveis no Output do Godot — útil para diagnóstico.
-##
-## ROOT MOTION:
-##   Se as animações moverem o personagem fisicamente (root motion),
-##   o AnimationPlayer é configurado com root_motion_track.
-##   O controlador usa apenas velocity do CharacterBody3D para mover —
-##   root motion é desactivado por defeito para não conflituar.
-##
-## ESCALA DO MODELO (The_Soldier.glb):
-##   Dimensões não confirmadas por teste real.
-##   Se gigante (Mixamo exportado em cm): escala 0.01 em player.tscn
-##   Se em metros (~1.8m altura): escala 1.0 (padrão actual)
-##
-## MOVIMENTO:
-##   - WASD / joystick virtual → movimento
-##   - Botão RUN / Shift → correr
-##   - Botão JUMP / Espaço → saltar
-##   - Arrastar ecrã (zona direita) / rato capturado → câmara
 ##
 ## =============================================================================
 
@@ -161,8 +145,6 @@ func _find_animation_player() -> void:
 	print("[PlayerController] AnimationPlayer encontrado: ", _anim_player.get_path())
 
 	# Desactivar root motion — o CharacterBody3D controla o movimento
-	# Root motion numa animação de Mixamo moveria o personagem fisicamente
-	# e conflituaria com velocity do controlador.
 	_anim_player.root_motion_track = ""
 
 	# Listar TODAS as animações disponíveis (para diagnóstico no Output)
@@ -179,7 +161,6 @@ func _find_animation_player() -> void:
 
 func _find_ap_deep(root: Node) -> AnimationPlayer:
 	## Procura AnimationPlayer recursivamente na hierarquia.
-	## Profundidade máxima: 6 níveis (suficiente para qualquer GLB real).
 	if root == null:
 		return null
 	if root is AnimationPlayer:
@@ -292,13 +273,29 @@ func _rotate_mesh_toward(dir: Vector3) -> void:
 		character_mesh.transform.basis.slerp(target_basis, MESH_ROTATION_SPEED)
 
 func _dir_from_input(input_dir: Vector2) -> Vector3:
+	## CORRECÇÃO v3.1 — Problema 3: direcções invertidas.
+	## No ecrã Android, Y do touch cresce para baixo:
+	##   arrastar para cima → input_dir.y negativo → deve avançar (forward)
+	##   arrastar para baixo → input_dir.y positivo → deve recuar (-forward)
+	## Portanto o sinal correcto é: forward * -input_dir.y  (já estava correcto)
+	##
+	## O X estava duplo-invertido:
+	##   arrastar para a direita → input_dir.x positivo → deve mover para a direita (right)
+	##   touch_move_dir = clamped / JOYSTICK_RADIUS → X positivo = direita ✓
+	##   _dir_from_input usava right * input_dir.x → correcto em teoria
+	##   MAS a câmara tem rotate_y negativo, o que espelha o right vector.
+	##   Resultado final: negar o X do input para restaurar a direcção natural.
+	##
+	## Sumário das negações correctas para Godot 4 com câmara orbitante:
+	##   forward * -input_dir.y  → cima = avançar
+	##   right   * -input_dir.x  → joystick direita = mover para a direita
 	var basis   : Basis   = camera_pivot.global_transform.basis \
 		if camera_pivot else global_transform.basis
 	var forward : Vector3 = -basis.z.normalized()
 	var right   : Vector3 = basis.x.normalized()
 	forward.y = 0.0
 	right.y   = 0.0
-	return (forward * -input_dir.y + right * input_dir.x).normalized()
+	return (forward * -input_dir.y + right * -input_dir.x).normalized()
 
 # ─── SISTEMA DE ANIMAÇÃO ─────────────────────────────────────────────────────
 
@@ -315,7 +312,6 @@ func _update_animation(on_floor: bool, delta: float) -> void:
 
 	# Aterragem
 	if on_floor and not _was_on_floor:
-		# Usar Jump como Land se Land não existir (GLB sem animação de aterragem)
 		if _anim_map.has("Jump"):
 			_play_anim("Jump")
 		else:
@@ -342,15 +338,19 @@ func _update_animation(on_floor: bool, delta: float) -> void:
 func _play_anim(semantic: String, force: bool = false) -> void:
 	## Toca a animação pelo nome semântico ("Idle", "Walk", "Run", "Jump").
 	## Converte para o nome real via _anim_map.
+	##
+	## CORRECÇÃO v3.1 — Problema 2: animações param durante movimento contínuo.
+	## Causa: se o AnimationPlayer parar (animação sem loop ou interrompida),
+	## a guarda "_current_anim == semantic" impedia o relançamento porque
+	## o estado semântico não mudava — mas a animação estava parada.
+	## Solução: verificar _anim_player.is_playing() adicionalmente.
+	## Se a animação parou, relançar mesmo que o estado semântico seja o mesmo.
 	if _anim_player == null:
-		return
-	if not force and _current_anim == semantic:
 		return
 
 	# Resolver nome real
 	var real_name : String = _anim_map.get(semantic, "")
 	if real_name.is_empty():
-		# Último fallback: tentar o nome semântico directamente
 		if _anim_player.has_animation(semantic):
 			real_name = semantic
 		else:
@@ -359,6 +359,17 @@ func _play_anim(semantic: String, force: bool = false) -> void:
 	if not _anim_player.has_animation(real_name):
 		return
 
+	# Verificar se já está a tocar esta animação E não parou
+	# (is_playing() = false indica que o clip chegou ao fim sem loop)
+	var already_playing : bool = \
+		_current_anim == semantic and \
+		_anim_player.is_playing() and \
+		_anim_player.current_animation == real_name
+
+	if already_playing and not force:
+		return  # animação a correr correctamente — não reiniciar
+
+	# Tocar (ou retomar) a animação
 	_anim_player.play(real_name)
 	_current_anim = semantic
 

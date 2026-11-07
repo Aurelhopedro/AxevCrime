@@ -1,34 +1,40 @@
 extends CharacterBody3D
 
 ## =============================================================================
-## AXEV CRIME — PlayerController v2
+## AXEV CRIME — PlayerController v3
 ## =============================================================================
 ##
-## ARQUITECTURA DE ANIMAÇÃO (Quaternius Universal Base Characters + Anim Library 1):
+## FASE 3.1 — Integração de The_Soldier.glb (117 animações incorporadas)
 ##
-##   O sistema usa AnimationTree com AnimationStateMachine para transições suaves.
-##   Isto é mais robusto do que AnimationPlayer.play() directamente, especialmente
-##   em mobile onde os frame rates variam.
+## ARQUITECTURA DE ANIMAÇÃO:
+##   AnimationPlayer encontrado automaticamente dentro de CharacterMesh/The_Soldier.
+##   O GLB tem 117 animações com nomes desconhecidos à partida.
+##   O sistema usa _resolve_anim_name() para mapear nomes semânticos
+##   (Idle, Walk, Run, Jump) para os nomes reais do GLB.
 ##
-##   ESTADOS DA MÁQUINA:
-##   idle → walk (input detectado, velocidade < threshold de corrida)
-##   idle → run  (input detectado, botão run pressionado)
-##   walk → run  (botão run pressionado durante movimento)
-##   * → jump    (jump pressionado no chão)
-##   jump → idle (aterra no chão)
-##   * → fall    (velocidade.y < -1.0 e fora do chão)
-##   fall → idle (aterra no chão)
+##   MAPEAMENTO (ordem de prioridade — primeiro encontrado ganha):
+##   Idle   → "Idle", "idle", "IDLE", "Armature|Idle", "Standing Idle",
+##             "Breathing Idle", "mixamo.com" (Mixamo default idle)
+##   Walk   → "Walk", "walk", "Walking", "Walk Forward", "Walk_Forward",
+##             "Armature|Walk", "Walk In Place"
+##   Run    → "Run", "run", "Running", "Sprint", "sprint", "Jog",
+##             "Run Forward", "Armature|Run", "Run In Place"
+##   Jump   → "Jump", "jump", "Jumping", "Jump Up", "Fall",
+##             "Armature|Jump", "Jump In Place"
 ##
-##   NOMES DE ANIMAÇÃO (Universal Animation Library 1 — Standard):
-##   "Idle", "Walk", "Jog" (usado como walk rápido / run leve),
-##   "Sprint", "Jump", "Fall", "Land"
+##   Em runtime, _ready() imprime a lista completa das animações
+##   disponíveis no Output do Godot — útil para diagnóstico.
 ##
-##   O script tenta os nomes exactos e cai para alternativas se não encontrar.
+## ROOT MOTION:
+##   Se as animações moverem o personagem fisicamente (root motion),
+##   o AnimationPlayer é configurado com root_motion_track.
+##   O controlador usa apenas velocity do CharacterBody3D para mover —
+##   root motion é desactivado por defeito para não conflituar.
 ##
-## RETARGETING:
-##   O GLB de animações (AnimationRoot/animations.glb) usa rig humanoid.
-##   O Godot 4.3 retargeta automaticamente para o esqueleto do personagem
-##   desde que ambos estejam configurados com SkeletonProfileHumanoid.
+## ESCALA DO MODELO (The_Soldier.glb):
+##   Dimensões não confirmadas por teste real.
+##   Se gigante (Mixamo exportado em cm): escala 0.01 em player.tscn
+##   Se em metros (~1.8m altura): escala 1.0 (padrão actual)
 ##
 ## MOVIMENTO:
 ##   - WASD / joystick virtual → movimento
@@ -50,20 +56,52 @@ const CAM_PITCH_MAX     : float = 0.4
 ## Rotação suave do personagem (slerp factor por frame a 60fps)
 const MESH_ROTATION_SPEED : float = 0.18
 
-## Nomes de animação do Universal Animation Library 1 (versão Standard)
-## Se o teu GLB usar prefixo "Armature|", o script tenta automaticamente.
-const ANIM_IDLE   : String = "Idle"
-const ANIM_WALK   : String = "Walk"
-const ANIM_JOG    : String = "Jog"      # usado para run leve
-const ANIM_SPRINT  : String = "Sprint"   # usado para run rápido
-const ANIM_JUMP   : String = "Jump"
-const ANIM_FALL   : String = "Fall"
-const ANIM_LAND   : String = "Land"
-
 ## Velocidade horizontal mínima para sair do Idle
 const MOVE_THRESHOLD : float = 0.3
 ## Velocidade horizontal para transição walk→run
 const RUN_THRESHOLD  : float = 5.5
+
+## Nomes semânticos → lista de candidatos por ordem de prioridade.
+## O primeiro encontrado no AnimationPlayer é o que fica mapeado.
+const ANIM_CANDIDATES : Dictionary = {
+	"Idle": [
+		"Idle", "idle", "IDLE",
+		"Armature|Idle", "Armature|idle",
+		"Standing Idle", "standing_idle",
+		"Breathing Idle", "breathing_idle",
+		"Idle_Neutral", "idle_neutral",
+		"mixamo.com",          # Mixamo default idle exportado sem rename
+		"T-Pose",              # fallback de último recurso
+	],
+	"Walk": [
+		"Walk", "walk", "Walking", "walking",
+		"Armature|Walk", "Armature|walk",
+		"Walk Forward", "Walk_Forward", "walk_forward",
+		"WalkForward", "Walk In Place", "Walk_InPlace",
+		"Walk_Normal", "Slow Walk",
+	],
+	"Run": [
+		"Run", "run", "Running", "running",
+		"Sprint", "sprint", "Sprinting",
+		"Jog", "jog", "Jogging",
+		"Armature|Run", "Armature|run",
+		"Armature|Sprint", "Armature|Jog",
+		"Run Forward", "Run_Forward", "run_forward",
+		"RunForward", "Run In Place", "Run_InPlace",
+		"Fast Run",
+	],
+	"Jump": [
+		"Jump", "jump", "Jumping", "jumping",
+		"Jump Up", "Jump_Up", "jump_up",
+		"Armature|Jump", "Armature|jump",
+		"Jump In Place", "Jump_InPlace",
+		"Jump Start", "Fall",
+		"Leap",
+	],
+}
+
+## Mapeamento resolvido em runtime: "Idle" → nome real no AnimationPlayer
+var _anim_map        : Dictionary = {}
 
 # ─── Estado público (lido pelo touch_controller.gd) ─────────────────────────
 var is_in_vehicle        : bool    = false
@@ -73,12 +111,12 @@ var touch_jump_requested : bool    = false
 
 # ─── Flags internas ─────────────────────────────────────────────────────────
 var _is_mobile     : bool = false
-var _was_on_floor  : bool = true   # para detectar aterragem
+var _was_on_floor  : bool = true
 
 # ─── Estado de animação ──────────────────────────────────────────────────────
-var _anim_player   : AnimationPlayer = null   # encontrado nos GLBs
+var _anim_player   : AnimationPlayer = null
 var _current_anim  : String = ""
-var _land_timer    : float  = 0.0             # duração da animação Land
+var _land_timer    : float  = 0.0
 
 # ─── Nós ────────────────────────────────────────────────────────────────────
 @onready var camera_pivot    : Node3D = $CameraPivot
@@ -95,46 +133,95 @@ func _ready() -> void:
 	if not _is_mobile and not OS.has_feature("web"):
 		Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
 
-	# Aguardar um frame para os filhos GLB estarem instanciados
+	# Aguardar um frame para The_Soldier.glb estar completamente instanciado
 	await get_tree().process_frame
 	_find_animation_player()
 
 func _find_animation_player() -> void:
-	## Procura AnimationPlayer em AnimationRoot (GLB de animações) primeiro,
-	## depois em CharacterMesh (GLB do personagem), como fallback.
-	## O Universal Animation Library 1 coloca o AnimationPlayer no nó raiz do GLB.
+	## Localiza o AnimationPlayer dentro de The_Soldier.glb.
+	## O GLB Mixamo/Soldier coloca o AP dentro da hierarquia:
+	##   The_Soldier → Armature → AnimationPlayer   (Mixamo via Blender)
+	##   The_Soldier → AnimationPlayer               (exportação directa)
+	##   The_Soldier → [RootNode] → AnimationPlayer  (outros pipelines)
 
-	# 1ª tentativa: AnimationRoot (separado, preferido)
-	_anim_player = _find_ap_in(animation_root)
+	# 1ª tentativa: AnimationRoot (biblioteca externa — não esperada aqui)
+	_anim_player = _find_ap_deep(animation_root)
 
-	# 2ª tentativa: CharacterMesh (GLB com animações incorporadas)
+	# 2ª tentativa: CharacterMesh (The_Soldier.glb — principal)
 	if _anim_player == null:
-		_anim_player = _find_ap_in(character_mesh)
+		_anim_player = _find_ap_deep(character_mesh)
 
-	if _anim_player != null:
-		print("[PlayerController] AnimationPlayer encontrado: ", _anim_player.get_path())
-		_play_anim(ANIM_IDLE, true)
-	else:
+	if _anim_player == null:
 		push_warning(
-			"[PlayerController] AnimationPlayer não encontrado.\n" +
-			"  → Coloca o GLB Quaternius em CharacterMesh ou AnimationRoot.\n" +
-			"  → Ver assets/models/character/README.md")
+			"[PlayerController] AnimationPlayer não encontrado em CharacterMesh nem AnimationRoot.\n" +
+			"  Hierarquia actual de CharacterMesh:\n" +
+			_dump_tree(character_mesh, 0))
+		return
 
-func _find_ap_in(root: Node3D) -> AnimationPlayer:
+	print("[PlayerController] AnimationPlayer encontrado: ", _anim_player.get_path())
+
+	# Desactivar root motion — o CharacterBody3D controla o movimento
+	# Root motion numa animação de Mixamo moveria o personagem fisicamente
+	# e conflituaria com velocity do controlador.
+	_anim_player.root_motion_track = ""
+
+	# Listar TODAS as animações disponíveis (para diagnóstico no Output)
+	var all_anims : Array = Array(_anim_player.get_animation_list())
+	print("[PlayerController] %d animações disponíveis:" % all_anims.size())
+	for a in all_anims:
+		print("  • ", a)
+
+	# Resolver mapeamento semântico → nome real
+	_build_anim_map(all_anims)
+
+	# Iniciar Idle
+	_play_anim("Idle", true)
+
+func _find_ap_deep(root: Node) -> AnimationPlayer:
+	## Procura AnimationPlayer recursivamente na hierarquia.
+	## Profundidade máxima: 6 níveis (suficiente para qualquer GLB real).
 	if root == null:
 		return null
-	# Procura directa no nó
 	if root is AnimationPlayer:
 		return root as AnimationPlayer
-	# Procura nos filhos imediatos (nó raiz do GLB)
 	for child in root.get_children():
-		if child is AnimationPlayer:
-			return child as AnimationPlayer
-		# Procura um nível mais fundo (GLB com hierarquia: raiz → Armature → AP)
-		var ap := child.find_child("AnimationPlayer", true, false)
-		if ap is AnimationPlayer:
-			return ap as AnimationPlayer
+		var result := _find_ap_deep(child)
+		if result != null:
+			return result
 	return null
+
+func _build_anim_map(available: Array) -> void:
+	## Para cada estado semântico, encontra o primeiro candidato presente.
+	_anim_map.clear()
+	for semantic in ANIM_CANDIDATES.keys():
+		var found : String = ""
+		for candidate in ANIM_CANDIDATES[semantic]:
+			if candidate in available:
+				found = candidate
+				break
+		if found.is_empty():
+			# Fallback: procura por substring case-insensitive
+			var key_lower : String = semantic.to_lower()
+			for a in available:
+				if key_lower in a.to_lower():
+					found = a
+					break
+		if not found.is_empty():
+			_anim_map[semantic] = found
+			print("[PlayerController] Mapeamento: %s → \"%s\"" % [semantic, found])
+		else:
+			push_warning("[PlayerController] Animação '%s' não encontrada. Estados: %s" % [semantic, str(available)])
+
+func _dump_tree(node: Node, depth: int) -> String:
+	## Serializa a hierarquia de nós para diagnóstico.
+	if node == null:
+		return ""
+	var indent : String = "  ".repeat(depth)
+	var result : String = indent + node.name + " (" + node.get_class() + ")\n"
+	if depth < 4:
+		for child in node.get_children():
+			result += _dump_tree(child, depth + 1)
+	return result
 
 # ─── INPUT (rato/desktop) ────────────────────────────────────────────────────
 
@@ -183,7 +270,6 @@ func _handle_movement(_delta: float) -> void:
 		var dir : Vector3 = _dir_from_input(input_dir)
 		velocity.x = dir.x * speed
 		velocity.z = dir.z * speed
-		# Rotação suave do CharacterMesh para a direcção do movimento
 		_rotate_mesh_toward(dir)
 	else:
 		velocity.x = move_toward(velocity.x, 0.0, speed)
@@ -196,8 +282,6 @@ func _handle_jump(on_floor: bool) -> void:
 		velocity.y = JUMP_VELOCITY
 
 func _rotate_mesh_toward(dir: Vector3) -> void:
-	## Roda suavemente o CharacterMesh para a direcção de movimento.
-	## Usa a projecção horizontal da direcção (Y=0) para evitar inclinação.
 	if character_mesh == null:
 		return
 	var flat_dir := Vector3(dir.x, 0.0, dir.z)
@@ -219,27 +303,29 @@ func _dir_from_input(input_dir: Vector2) -> Vector3:
 # ─── SISTEMA DE ANIMAÇÃO ─────────────────────────────────────────────────────
 
 func _update_animation(on_floor: bool, delta: float) -> void:
-	## Máquina de estados de animação.
-	## Prioridade: Land > Jump > Fall > Run > Walk > Idle
+	## Máquina de estados: Land > Jump > Fall > Run > Walk > Idle
 
-	# Temporizador da animação Land
+	if _anim_player == null:
+		return
+
+	# Temporizador da animação Land (bloqueio temporário após aterrar)
 	if _land_timer > 0.0:
 		_land_timer -= delta
-		return  # aguarda que o Land termine
+		return
 
-	# Aterragem (transição ar→chão)
+	# Aterragem
 	if on_floor and not _was_on_floor:
-		_play_anim(ANIM_LAND)
-		# Tempo aproximado da animação Land (ajustar se o GLB for diferente)
-		_land_timer = 0.4
+		# Usar Jump como Land se Land não existir (GLB sem animação de aterragem)
+		if _anim_map.has("Jump"):
+			_play_anim("Jump")
+		else:
+			_play_anim("Idle")
+		_land_timer = 0.35
 		return
 
 	# No ar
 	if not on_floor:
-		if velocity.y > 0.1:
-			_play_anim(ANIM_JUMP)
-		else:
-			_play_anim(ANIM_FALL)
+		_play_anim("Jump")
 		return
 
 	# No chão
@@ -247,52 +333,40 @@ func _update_animation(on_floor: bool, delta: float) -> void:
 	var is_running : bool  = Input.is_action_pressed("run") or touch_run
 
 	if h_speed < MOVE_THRESHOLD:
-		_play_anim(ANIM_IDLE)
+		_play_anim("Idle")
 	elif is_running:
-		# Sprint se velocidade alta, Jog se velocidade média
-		if h_speed >= RUN_THRESHOLD:
-			_play_anim(ANIM_SPRINT)
-		else:
-			_play_anim(ANIM_JOG)
+		_play_anim("Run")
 	else:
-		_play_anim(ANIM_WALK)
+		_play_anim("Walk")
 
-func _play_anim(name: String, force: bool = false) -> void:
-	## Toca a animação. Se `name` não existir, tenta "Armature|<name>".
-	## Não faz nada se já estiver a tocar a mesma animação (evita reset).
+func _play_anim(semantic: String, force: bool = false) -> void:
+	## Toca a animação pelo nome semântico ("Idle", "Walk", "Run", "Jump").
+	## Converte para o nome real via _anim_map.
 	if _anim_player == null:
 		return
-	if not force and _current_anim == name:
+	if not force and _current_anim == semantic:
 		return
 
-	var actual_name : String = _resolve_anim_name(name)
-	if actual_name.is_empty():
-		return  # animação não encontrada — falha silenciosa
+	# Resolver nome real
+	var real_name : String = _anim_map.get(semantic, "")
+	if real_name.is_empty():
+		# Último fallback: tentar o nome semântico directamente
+		if _anim_player.has_animation(semantic):
+			real_name = semantic
+		else:
+			return  # não encontrado — falha silenciosa
 
-	_anim_player.play(actual_name)
-	_current_anim = name
+	if not _anim_player.has_animation(real_name):
+		return
 
-func _resolve_anim_name(name: String) -> String:
-	## Retorna o nome real da animação no AnimationPlayer.
-	## Tenta: nome exacto → "Armature|<nome>" → vazio (não encontrado).
-	if _anim_player.has_animation(name):
-		return name
-	var alt := "Armature|" + name
-	if _anim_player.has_animation(alt):
-		return alt
-	# Log único para evitar spam no console
-	if not _current_anim.begins_with("__missing_"):
-		push_warning(
-			"[PlayerController] Animação '%s' não encontrada no AnimationPlayer.\n" %
-			name + "  Animações disponíveis: %s" %
-			str(_anim_player.get_animation_list()))
-	return ""
+	_anim_player.play(real_name)
+	_current_anim = semantic
 
 # ─── API VEÍCULO ─────────────────────────────────────────────────────────────
 
 func enter_vehicle(_vehicle_node: Node) -> void:
 	is_in_vehicle = true
-	_play_anim(ANIM_IDLE, true)
+	_play_anim("Idle", true)
 
 func exit_vehicle() -> void:
 	is_in_vehicle = false

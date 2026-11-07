@@ -28,5 +28,4 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
 [node name="Camera3D" type="Camera3D" parent="CameraPivot"]
 transform = Transform3D(1, 0, 0, 0, 0.966, 0.259, 0, -0.259, 0.966, 0, 0, 3)
 
-[node name="TouchUI" parent="."]
-instance = ExtResource("2_touch_ui")
+[node name="TouchUI" parent="." instance=ExtResource("2_touch_ui")]

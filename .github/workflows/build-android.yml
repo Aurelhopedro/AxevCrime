@@ -1,8 +1,6 @@
 name: Build Android APK (Debug)
 
 # ── EXECUÇÃO APENAS MANUAL ─────────────────────────────────────────
-# Nunca executa automaticamente em push ou pull_request.
-# Para executar: GitHub → Actions → Build Android APK (Debug) → Run workflow
 on:
   workflow_dispatch:
 
@@ -21,14 +19,13 @@ jobs:
         uses: actions/checkout@v4
 
       # ── 2. JAVA 17 ─────────────────────────────────────────────────
-      # ubuntu-22.04 inclui Java 17 por omissão; apenas confirmamos
       - name: Confirmar Java 17
         run: |
           java -version
-          echo "JAVA_HOME: ${JAVA_HOME:-não definido}"
           JAVA_PATH="$(readlink -f "$(which java)")"
           JAVA_HOME_DETECTED="$(dirname "$(dirname "$JAVA_PATH")")"
           echo "JAVA_HOME_DETECTED=$JAVA_HOME_DETECTED" >> "$GITHUB_ENV"
+          echo "Java home: $JAVA_HOME_DETECTED"
 
       # ── 3. DEPENDÊNCIAS DO SISTEMA ─────────────────────────────────
       - name: Instalar dependências do sistema
@@ -72,75 +69,96 @@ jobs:
           mkdir -p "$TEMPLATES_DIR"
           cp -r "$TEMPLATE_SRC"/. "$TEMPLATES_DIR/"
           echo "Templates instalados: $(ls "$TEMPLATES_DIR" | wc -l) ficheiros"
-          echo "Ficheiros Android presentes:"
           ls "$TEMPLATES_DIR/" | grep -i android || echo "AVISO: nenhum ficheiro android encontrado"
 
-      # ── 6. ANDROID SDK ─────────────────────────────────────────────
-      # O runner ubuntu-22.04 já inclui o Android SDK pré-instalado.
-      # Localizamos o sdkmanager e instalamos exactamente o que o Godot 4.3 requer.
-      - name: Localizar e configurar Android SDK
+      # ── 6. ANDROID SDK — localizar o pré-instalado no runner ───────
+      - name: Localizar Android SDK
         run: |
           set -euo pipefail
 
-          # O runner ubuntu-22.04 tem o SDK aqui:
           CANDIDATE="/usr/local/lib/android/sdk"
-          if [[ -d "$CANDIDATE" ]]; then
-            export ANDROID_SDK_ROOT="$CANDIDATE"
-            echo "SDK pré-instalado encontrado: $ANDROID_SDK_ROOT"
-          else
+          if [[ ! -d "$CANDIDATE" ]]; then
             echo "::error::Android SDK não encontrado em $CANDIDATE"
             exit 1
           fi
 
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$CANDIDATE" >> "$GITHUB_ENV"
+          echo "Android SDK: $CANDIDATE"
 
-          # Localizar sdkmanager — pode estar em vários caminhos no runner
-          SDKMANAGER="$(find "$ANDROID_SDK_ROOT" -name "sdkmanager" 2>/dev/null | head -1)"
+          # Localizar sdkmanager
+          SDKMANAGER="$(find "$CANDIDATE" -name "sdkmanager" 2>/dev/null | head -1)"
           if [[ -z "$SDKMANAGER" ]]; then
-            echo "::error::sdkmanager não encontrado em $ANDROID_SDK_ROOT"
-            find "$ANDROID_SDK_ROOT" -type f -name "*.sh" 2>/dev/null | head -10 || true
+            echo "::error::sdkmanager não encontrado"
             exit 1
           fi
 
           echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
-          echo "sdkmanager localizado: $SDKMANAGER"
-          "$SDKMANAGER" --version
+          echo "sdkmanager: $SDKMANAGER"
+          "$SDKMANAGER" --version || true
 
-      - name: Instalar componentes Android para Godot 4.3
+      # ── 7. BUILD TOOLS E PLATFORM ──────────────────────────────────
+      # Instalar apenas build-tools e platform — SEM NDK via sdkmanager
+      # para evitar o SIGPIPE causado por yes | sdkmanager | tail
+      - name: Instalar build-tools e platform Android
         run: |
           set -euo pipefail
 
-          # Aceitar licenças de forma não interactiva
-          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          # Aceitar licenças — sem pipe, redireccionando input directamente
+          "$SDKMANAGER" --licenses < /dev/null 2>&1 | grep -v "^$" | tail -5 || true
 
-          # Componentes exactos exigidos pelo Godot 4.3:
-          #   Build Tools 34.0.0  — para apksigner e aapt2
-          #   Platform android-34 — API level 34
-          #   NDK r23c (23.2.8568313) — versão testada com Godot 4.x
-          echo "A instalar build-tools, platform e NDK..."
-          yes | "$SDKMANAGER" \
-            "build-tools;34.0.0" \
-            "platforms;android-34" \
-            "ndk;23.2.8568313" \
-            2>&1 | tail -10
+          # Instalar build-tools e platform sem NDK (NDK já existe no runner)
+          # Capturar exit code correctamente sem pipe para tail
+          "$SDKMANAGER" "build-tools;34.0.0" "platforms;android-34" \
+            < /dev/null > /tmp/sdkmanager_install.log 2>&1
+          SDK_EXIT=$?
 
-          # Verificar NDK instalado
-          ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/23.2.8568313"
-          if [[ ! -d "$ANDROID_NDK_ROOT" ]]; then
-            echo "::error::NDK 23.2.8568313 não foi instalado correctamente"
-            echo "NDKs disponíveis:"
-            ls "$ANDROID_SDK_ROOT/ndk/" 2>/dev/null || echo "(directório ndk vazio)"
+          tail -10 /tmp/sdkmanager_install.log
+
+          if [[ "$SDK_EXIT" -ne 0 ]]; then
+            echo "::error::sdkmanager falhou (exit $SDK_EXIT)"
+            cat /tmp/sdkmanager_install.log
             exit 1
           fi
 
-          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT" >> "$GITHUB_ENV"
-          echo "NDK instalado: $ANDROID_NDK_ROOT"
-          echo "Build Tools instaladas:"
-          ls "$ANDROID_SDK_ROOT/build-tools/" 2>/dev/null
+          echo "Build Tools e Platform instalados."
+          ls "$ANDROID_SDK_ROOT/build-tools/" 2>/dev/null || true
 
-      # ── 7. KEYSTORE DE DEBUG ────────────────────────────────────────
-      # Gerada apenas no runner, nunca vai ao repositório.
-      # Credenciais de debug públicas e conhecidas (não são segredos).
+      # ── 8. NDK — reutilizar o pré-instalado no runner ──────────────
+      # O runner ubuntu-22.04 já inclui NDK 25.x ou 26.x
+      # O Godot 4.3 é compatível com NDK >= 23
+      - name: Localizar NDK pré-instalado
+        run: |
+          set -euo pipefail
+
+          NDK_BASE="$ANDROID_SDK_ROOT/ndk"
+          echo "NDKs disponíveis no runner:"
+          ls "$NDK_BASE/" 2>/dev/null || echo "(nenhum)"
+
+          # Preferir r23c se existir, senão usar o mais recente disponível
+          if [[ -d "$NDK_BASE/23.2.8568313" ]]; then
+            ANDROID_NDK_ROOT="$NDK_BASE/23.2.8568313"
+            echo "NDK r23c encontrado."
+          else
+            # Usar o NDK mais recente pré-instalado (Godot 4.3 aceita >= r23)
+            ANDROID_NDK_ROOT="$(find "$NDK_BASE" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -1)"
+            if [[ -z "$ANDROID_NDK_ROOT" ]]; then
+              echo "::error::Nenhum NDK encontrado no runner"
+              exit 1
+            fi
+            echo "NDK pré-instalado encontrado: $ANDROID_NDK_ROOT"
+          fi
+
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT" >> "$GITHUB_ENV"
+          echo "NDK a usar: $ANDROID_NDK_ROOT"
+
+          # Verificar que é um NDK válido
+          if [[ ! -f "$ANDROID_NDK_ROOT/source.properties" ]]; then
+            echo "::error::source.properties não encontrado — NDK inválido"
+            exit 1
+          fi
+          cat "$ANDROID_NDK_ROOT/source.properties"
+
+      # ── 9. KEYSTORE DE DEBUG ────────────────────────────────────────
       - name: Gerar keystore de debug temporária
         run: |
           set -euo pipefail
@@ -156,25 +174,22 @@ jobs:
               -keysize 2048 \
               -validity 10000 \
               -dname "CN=Android Debug,O=Android,C=US"
-            echo "Keystore de debug gerada: $KEYSTORE_PATH"
+            echo "Keystore gerada: $KEYSTORE_PATH"
           else
-            echo "Keystore de debug já existia: $KEYSTORE_PATH"
+            echo "Keystore já existia: $KEYSTORE_PATH"
           fi
           echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
 
-      # ── 8. CONFIGURAR KEYSTORE VIA VARIÁVEIS DE AMBIENTE ───────────
-      # O Godot 4.3 lê nativamente estas variáveis de ambiente em modo headless,
-      # evitando completamente o problema de editor_settings-4.tres com heredoc.
-      # Fonte: https://docs.godotengine.org/en/4.3/tutorials/export/exporting_for_android.html
-      - name: Configurar variáveis de ambiente para keystore Android
+      # ── 10. KEYSTORE VIA VARIÁVEIS DE AMBIENTE ─────────────────────
+      # Godot 4.3 lê nativamente GODOT_ANDROID_KEYSTORE_DEBUG_* em modo headless
+      - name: Configurar variáveis de keystore Android
         run: |
-          set -euo pipefail
-          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$KEYSTORE_PATH"    >> "$GITHUB_ENV"
-          echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=androiddebugkey"   >> "$GITHUB_ENV"
-          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD=android"       >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$KEYSTORE_PATH"  >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=androiddebugkey" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD=android"     >> "$GITHUB_ENV"
           echo "Variáveis de keystore configuradas."
 
-      # ── 9. IMPORTAR RECURSOS DO PROJECTO ───────────────────────────
+      # ── 11. IMPORTAR RECURSOS DO PROJECTO ──────────────────────────
       - name: Importar recursos do projecto
         timeout-minutes: 5
         run: |
@@ -187,18 +202,17 @@ jobs:
             --quit 2>&1 | tee /tmp/godot_import.log
           status=${PIPESTATUS[0]}
 
-          echo "--- Godot import log (últimas 20 linhas) ---"
+          echo "--- Import log (últimas 20 linhas) ---"
           tail -20 /tmp/godot_import.log
 
           if grep -Eiq \
             '(^ERROR:|SCRIPT ERROR:|Parse Error:|Failed to load script|Failed loading resource)' \
             /tmp/godot_import.log; then
-            echo "::warning::Erros detectados durante o import — a continuar"
+            echo "::warning::Erros detectados no import — a continuar"
           fi
-
           echo "Import concluído (exit: $status)"
 
-      # ── 10. EXPORTAR ANDROID DEBUG APK ─────────────────────────────
+      # ── 12. EXPORTAR ANDROID DEBUG APK ─────────────────────────────
       - name: Exportar Android Debug APK
         timeout-minutes: 20
         env:
@@ -207,7 +221,6 @@ jobs:
           GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: ${{ env.GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD }}
         run: |
           set -euo pipefail
-
           mkdir -p build/android
 
           echo "SDK:  $ANDROID_SDK_ROOT"
@@ -215,7 +228,6 @@ jobs:
           echo "JDK:  $JAVA_HOME_DETECTED"
           echo "KS:   $GODOT_ANDROID_KEYSTORE_DEBUG_PATH"
           echo ""
-          echo "A iniciar exportação Android Debug..."
 
           timeout 900s godot \
             --headless \
@@ -225,54 +237,46 @@ jobs:
             2>&1 | tee /tmp/godot_android_export.log
           status=${PIPESTATUS[0]}
 
-          echo ""
-          echo "--- Godot Android export log (últimas 60 linhas) ---"
+          echo "--- Export log (últimas 60 linhas) ---"
           tail -60 /tmp/godot_android_export.log
 
           if [[ "$status" -ne 0 ]]; then
-            echo "::error::Exportação Android falhou com exit code $status"
-            echo "--- Log completo ---"
-            cat /tmp/godot_android_export.log
+            echo "::error::Exportação Android falhou (exit $status)"
             exit 1
           fi
+          echo "Exportação Android concluída."
 
-          echo "Exportação Android concluída (exit: $status)."
-
-      # ── 11. VERIFICAR APK — confirmar antes de declarar sucesso ────
+      # ── 13. VERIFICAR APK ──────────────────────────────────────────
       - name: Verificar APK gerado
         run: |
           set -euo pipefail
-
           APK="build/android/axev_crime.apk"
 
           if [[ ! -f "$APK" ]]; then
-            echo "::error::APK não encontrado em $APK"
-            echo "Conteúdo de build/android/:"
-            ls -lh build/android/ 2>/dev/null || echo "(directório vazio ou inexistente)"
+            echo "::error::APK não encontrado: $APK"
+            ls -lh build/android/ 2>/dev/null || echo "(directório vazio)"
             exit 1
           fi
 
           APK_SIZE=$(wc -c < "$APK")
           if [[ "$APK_SIZE" -lt 1000 ]]; then
-            echo "::error::APK existe mas tem apenas $APK_SIZE bytes — provavelmente vazio ou corrompido"
+            echo "::error::APK tem apenas $APK_SIZE bytes — corrompido"
             exit 1
           fi
 
-          # Um APK é um ZIP — deve começar com magic bytes PK (0x50 0x4B)
           HEX_MAGIC=$(xxd -l 2 -p "$APK")
           if [[ "$HEX_MAGIC" != "504b" ]]; then
-            echo "::error::O ficheiro não é um ZIP/APK válido (magic: $HEX_MAGIC, esperado: 504b)"
+            echo "::error::Não é um ZIP/APK válido (magic: $HEX_MAGIC)"
             exit 1
           fi
 
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "  APK VERIFICADO COM SUCESSO"
-          echo "  Caminho:  $APK"
-          echo "  Tamanho:  $(du -sh "$APK" | cut -f1) ($APK_SIZE bytes)"
-          echo "  Magic:    $HEX_MAGIC (ZIP válido)"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Tamanho: $(du -sh "$APK" | cut -f1)"
+          echo "  Magic:   $HEX_MAGIC (ZIP válido)"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-      # ── 12. UPLOAD DO APK COMO ARTIFACT DESCARREGÁVEL ──────────────
+      # ── 14. UPLOAD APK COMO ARTIFACT DESCARREGÁVEL ─────────────────
       - name: Upload APK como artifact
         uses: actions/upload-artifact@v4
         with:
@@ -281,8 +285,8 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
-      # ── 13. LOGS SEMPRE GUARDADOS (mesmo em falha) ─────────────────
-      - name: Upload logs de exportação
+      # ── 15. LOGS SEMPRE GUARDADOS ──────────────────────────────────
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -290,32 +294,20 @@ jobs:
           path: |
             /tmp/godot_import.log
             /tmp/godot_android_export.log
+            /tmp/sdkmanager_install.log
           retention-days: 7
           if-no-files-found: ignore
 
-      # ── 14. SUMÁRIO FINAL ──────────────────────────────────────────
+      # ── 16. SUMÁRIO ────────────────────────────────────────────────
       - name: Sumário da exportação
         if: always()
         run: |
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "  AXEV CRIME — Android Debug Build"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "  Godot:       4.3-stable"
-          echo "  Plataforma:  Android arm64-v8a"
-          echo "  SDK:         API 34 / Build Tools 34.0.0"
-          echo "  NDK:         r23c (23.2.8568313)"
-          echo "  Assinatura:  debug keystore (gerada no runner)"
-          echo "  APK:         build/android/axev_crime.apk"
-          echo ""
+          echo "  Godot:  4.3-stable | SDK: API 34 | NDK: $ANDROID_NDK_ROOT"
           if [[ -f "build/android/axev_crime.apk" ]]; then
-            echo "  RESULTADO:   ✓ APK GERADO"
-            echo "  Tamanho:     $(du -sh build/android/axev_crime.apk | cut -f1)"
+            echo "  RESULTADO: ✓ APK GERADO ($(du -sh build/android/axev_crime.apk | cut -f1))"
           else
-            echo "  RESULTADO:   ✗ APK NÃO GERADO"
+            echo "  RESULTADO: ✗ APK NÃO GERADO"
           fi
-          echo ""
-          echo "  Para instalar:"
-          echo "  1. Descarregar artifact 'axev-crime-android-debug'"
-          echo "  2. Activar 'Origens desconhecidas' nas definições Android"
-          echo "  3. Instalar o APK directamente"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

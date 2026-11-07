@@ -1,0 +1,18 @@
+LICENÇA DOS ASSETS 3D — AXEV CRIME
+====================================
+
+Os ficheiros nesta pasta são propriedade do autor Quaternius,
+disponibilizados sob Creative Commons Zero v1.0 Universal (CC0).
+https://creativecommons.org/publicdomain/zero/1.0/
+
+Uso livre em projectos pessoais, educacionais e comerciais.
+Sem necessidade de atribuição. Sem restrições.
+
+AUTOR: Quaternius — https://quaternius.com
+
+  character.glb  — Universal Base Characters (Standard, CC0)
+    https://quaternius.itch.io/universal-base-characters
+
+  animations.glb — Universal Animation Library 1 (Standard, CC0)
+    https://opengameart.org/content/universal-animation-library
+    https://quaternius.itch.io/universal-animation-library

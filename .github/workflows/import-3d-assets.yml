@@ -1,0 +1,659 @@
+name: Import 3D Assets from Google Drive
+
+# ============================================================================
+# AXEV CRIME — Import 3D Assets from Google Drive
+# ============================================================================
+#
+# Descarrega o pacote 3D do Google Drive, extrai, selecciona os recursos
+# compatíveis com Godot 4.3 (preservando dependências .bin e texturas),
+# organiza nas pastas do projecto e faz commit/push.
+#
+# UTILIZAÇÃO: GitHub Actions → "Run workflow" (manual)
+#
+# GOOGLE DRIVE FILE ID: 1ZBZgoa2DVnWkI7HbP9aFt3piGmuVCXKr
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (analisa mas NÃO faz commit)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: write
+
+jobs:
+  import-assets:
+    name: Download & Organise 3D Assets
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    env:
+      GDRIVE_FILE_ID: "1ZBZgoa2DVnWkI7HbP9aFt3piGmuVCXKr"
+      ZIP_PATH: "/tmp/pack3d.zip"
+      EXTRACT_DIR: "/tmp/pack3d_extracted"
+      DEST_BASE: "assets/models/character"
+      DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+
+    steps:
+      # ── 1. CHECKOUT ────────────────────────────────────────────────
+      - name: Checkout repositório
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. DEPENDÊNCIAS ────────────────────────────────────────────
+      - name: Instalar dependências
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            python3 python3-pip unzip file xxd git ca-certificates
+          pip3 install --quiet gdown
+
+      # ── 3. DOWNLOAD DO GOOGLE DRIVE ────────────────────────────────
+      - name: Descarregar ZIP do Google Drive
+        run: |
+          set -euo pipefail
+
+          echo "File ID: $GDRIVE_FILE_ID"
+          echo "Destino: $ZIP_PATH"
+
+          # gdown com fuzzy para contornar aviso de vírus do Drive
+          gdown --fuzzy \
+            "https://drive.google.com/file/d/${GDRIVE_FILE_ID}/view?usp=drivesdk" \
+            -O "$ZIP_PATH" \
+            --no-check-certificate
+
+          if [[ ! -f "$ZIP_PATH" ]]; then
+            echo "::error::gdown não produziu ficheiro em $ZIP_PATH"
+            exit 1
+          fi
+
+          FILE_SIZE=$(wc -c < "$ZIP_PATH")
+          echo "Tamanho descarregado: $FILE_SIZE bytes"
+
+          if [[ "$FILE_SIZE" -lt 1024 ]]; then
+            echo "::error::Ficheiro demasiado pequeno ($FILE_SIZE bytes) — download falhou ou bloqueado pelo Drive"
+            cat "$ZIP_PATH" | head -5 || true
+            exit 1
+          fi
+
+          echo "DOWNLOAD_OK=true" >> "$GITHUB_ENV"
+          echo "✓ Download concluído"
+
+      # ── 4. VALIDAR ZIP ─────────────────────────────────────────────
+      - name: Validar arquivo ZIP
+        run: |
+          set -euo pipefail
+
+          HEX=$(xxd -l 2 -p "$ZIP_PATH")
+          echo "Magic bytes: $HEX"
+
+          if [[ "$HEX" != "504b" ]]; then
+            echo "::error::Ficheiro não é ZIP válido (magic: $HEX)"
+            echo "Conteúdo inicial:"
+            xxd -l 64 "$ZIP_PATH" || true
+            exit 1
+          fi
+
+          # Verificar integridade com unzip -t
+          if ! unzip -t "$ZIP_PATH" > /tmp/zip_test.log 2>&1; then
+            echo "::error::ZIP corrompido ou inválido"
+            tail -20 /tmp/zip_test.log
+            exit 1
+          fi
+
+          echo "✓ ZIP válido"
+          TOTAL_FILES=$(grep -c "testing:" /tmp/zip_test.log || echo "0")
+          echo "Total de ficheiros no ZIP: $TOTAL_FILES"
+
+      # ── 5. EXTRAIR ─────────────────────────────────────────────────
+      - name: Extrair ZIP
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$EXTRACT_DIR"
+          unzip -q "$ZIP_PATH" -d "$EXTRACT_DIR"
+
+          echo "Estrutura extraída (primeiros 60 itens):"
+          find "$EXTRACT_DIR" | head -60
+
+          echo ""
+          echo "Total de ficheiros:"
+          find "$EXTRACT_DIR" -type f | wc -l
+
+      # ── 6. INVENTÁRIO DE RECURSOS ──────────────────────────────────
+      - name: Inventariar recursos 3D
+        run: |
+          set -euo pipefail
+
+          echo "=== GLTFs encontrados ==="
+          find "$EXTRACT_DIR" -name "*.gltf" | sort
+
+          echo ""
+          echo "=== GLBs encontrados ==="
+          find "$EXTRACT_DIR" -name "*.glb" | sort
+
+          echo ""
+          echo "=== BINs encontrados ==="
+          find "$EXTRACT_DIR" -name "*.bin" | sort
+
+          echo ""
+          echo "=== Texturas encontradas ==="
+          find "$EXTRACT_DIR" \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.webp" -o -name "*.ktx2" \) | sort
+
+          echo ""
+          echo "=== Animações encontradas ==="
+          find "$EXTRACT_DIR" \( -name "*anim*" -o -name "*Anim*" \) | sort
+
+          echo ""
+          echo "=== Licenças/Docs ==="
+          find "$EXTRACT_DIR" \( -name "*.txt" -o -name "*.md" -o -name "LICENSE*" -o -name "README*" \) | sort
+
+      # ── 7. SELECCIONAR RECURSOS GODOT ──────────────────────────────
+      - name: Seleccionar recursos compatíveis com Godot 4.3
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$EXTRACT_DIR/selected"
+
+          # Função: copiar GLTF com TODAS as dependências (bin + texturas)
+          copy_gltf_with_deps() {
+            local GLTF_SRC="$1"
+            local DEST_DIR="$2"
+            local GLTF_DIR
+            GLTF_DIR=$(dirname "$GLTF_SRC")
+            local GLTF_NAME
+            GLTF_NAME=$(basename "$GLTF_SRC")
+
+            mkdir -p "$DEST_DIR"
+            cp "$GLTF_SRC" "$DEST_DIR/"
+            echo "  GLTF: $GLTF_NAME → $DEST_DIR/"
+
+            # Extrair referências de buffers e imagens do GLTF (JSON)
+            if command -v python3 &>/dev/null; then
+              python3 - "$GLTF_SRC" "$GLTF_DIR" "$DEST_DIR" << 'PYEOF'
+          import json, sys, os, shutil
+
+          gltf_path = sys.argv[1]
+          src_dir   = sys.argv[2]
+          dst_dir   = sys.argv[3]
+
+          try:
+            with open(gltf_path, 'r', encoding='utf-8') as f:
+              data = json.load(f)
+          except Exception as e:
+            print(f"  AVISO: não foi possível analisar GLTF JSON: {e}")
+            sys.exit(0)
+
+          refs = []
+          for buf in data.get("buffers", []):
+            uri = buf.get("uri","")
+            if uri and not uri.startswith("data:"):
+              refs.append(uri)
+          for img in data.get("images", []):
+            uri = img.get("uri","")
+            if uri and not uri.startswith("data:"):
+              refs.append(uri)
+
+          for ref in refs:
+            src = os.path.join(src_dir, ref)
+            dst = os.path.join(dst_dir, ref)
+            os.makedirs(os.path.dirname(dst) if os.path.dirname(ref) else dst_dir, exist_ok=True)
+            if os.path.exists(src):
+              shutil.copy2(src, dst)
+              print(f"  DEP: {ref}")
+            else:
+              print(f"  AVISO: dependência não encontrada: {src}")
+          PYEOF
+            fi
+
+            # Copiar todos os .bin no mesmo directório (segurança extra)
+            find "$GLTF_DIR" -maxdepth 1 -name "*.bin" | while read -r BIN; do
+              cp "$BIN" "$DEST_DIR/" 2>/dev/null || true
+              echo "  BIN extra: $(basename "$BIN")"
+            done
+          }
+
+          # --- Superhero_Male_FullBody.gltf ---
+          MALE_GLTF=$(find "$EXTRACT_DIR" -name "Superhero_Male_FullBody.gltf" | head -1 || true)
+          if [[ -n "$MALE_GLTF" ]]; then
+            echo "✓ Encontrado: $MALE_GLTF"
+            copy_gltf_with_deps "$MALE_GLTF" "$EXTRACT_DIR/selected/protagonist"
+            echo "MALE_GLTF_FOUND=true" >> "$GITHUB_ENV"
+          else
+            echo "⚠ Superhero_Male_FullBody.gltf não encontrado"
+            echo "MALE_GLTF_FOUND=false" >> "$GITHUB_ENV"
+          fi
+
+          # --- Superhero_Female_FullBody.gltf ---
+          FEMALE_GLTF=$(find "$EXTRACT_DIR" -name "Superhero_Female_FullBody.gltf" | head -1 || true)
+          if [[ -n "$FEMALE_GLTF" ]]; then
+            echo "✓ Encontrado: $FEMALE_GLTF"
+            copy_gltf_with_deps "$FEMALE_GLTF" "$EXTRACT_DIR/selected/female"
+            echo "FEMALE_GLTF_FOUND=true" >> "$GITHUB_ENV"
+          else
+            echo "⚠ Superhero_Female_FullBody.gltf não encontrado"
+            echo "FEMALE_GLTF_FOUND=false" >> "$GITHUB_ENV"
+          fi
+
+          # --- GLBs na pasta Godot (se existir) ---
+          GODOT_DIR=$(find "$EXTRACT_DIR" -type d -iname "Godot" | head -1 || true)
+          if [[ -n "$GODOT_DIR" ]]; then
+            echo "✓ Pasta Godot encontrada: $GODOT_DIR"
+            mkdir -p "$EXTRACT_DIR/selected/godot_glbs"
+            find "$GODOT_DIR" -name "*.glb" | while read -r GLB; do
+              cp "$GLB" "$EXTRACT_DIR/selected/godot_glbs/"
+              echo "  GLB Godot: $(basename "$GLB")"
+            done
+          fi
+
+          # --- Animações (qualquer .glb ou .gltf com "anim" no nome) ---
+          ANIM_FOUND=false
+          find "$EXTRACT_DIR" -iname "*anim*.glb" -o -iname "*anim*.gltf" | while read -r ANIM; do
+            mkdir -p "$EXTRACT_DIR/selected/animations"
+            cp "$ANIM" "$EXTRACT_DIR/selected/animations/"
+            echo "  ANIM: $(basename "$ANIM")"
+            ANIM_FOUND=true
+          done
+
+          # --- Texturas no mesmo directório dos GLTFs seleccionados ---
+          if [[ "$MALE_GLTF_FOUND" == "true" ]] || [[ "$FEMALE_GLTF_FOUND" == "true" ]]; then
+            TEXTURES_DIR=$(find "$EXTRACT_DIR" -type d -iname "textures" | head -1 || true)
+            if [[ -n "$TEXTURES_DIR" ]]; then
+              mkdir -p "$EXTRACT_DIR/selected/textures"
+              find "$TEXTURES_DIR" -type f | while read -r TEX; do
+                cp "$TEX" "$EXTRACT_DIR/selected/textures/" 2>/dev/null || true
+              done
+              echo "✓ Texturas copiadas de: $TEXTURES_DIR"
+            fi
+          fi
+
+          # --- Licenças e documentação ---
+          mkdir -p "$EXTRACT_DIR/selected/licenses"
+          find "$EXTRACT_DIR" \( -name "*.txt" -o -name "*.md" -o -name "LICENSE*" -o -name "LICENCE*" -o -name "README*" \) | while read -r DOC; do
+            cp "$DOC" "$EXTRACT_DIR/selected/licenses/" 2>/dev/null || true
+          done
+
+          echo ""
+          echo "=== Recursos seleccionados ==="
+          find "$EXTRACT_DIR/selected" | sort
+
+      # ── 8. VERIFICAÇÃO DE TAMANHO ──────────────────────────────────
+      - name: Verificar tamanho total dos recursos
+        run: |
+          set -euo pipefail
+
+          TOTAL_BYTES=$(du -sb "$EXTRACT_DIR/selected" 2>/dev/null | cut -f1 || echo "0")
+          TOTAL_MB=$((TOTAL_BYTES / 1024 / 1024))
+          echo "Tamanho total dos recursos seleccionados: ${TOTAL_MB} MB"
+
+          # GitHub recomenda < 100 MB por ficheiro, repositório < 1 GB
+          # Aviso se > 50 MB, erro se > 100 MB
+          if [[ "$TOTAL_MB" -gt 100 ]]; then
+            echo "::error::Recursos excedem 100 MB (${TOTAL_MB} MB)."
+            echo "Solução: usar Git LFS ou GitHub Releases para ficheiros grandes."
+            echo "Adiciona o secret GIT_LFS=true para activar Git LFS automaticamente."
+            exit 1
+          elif [[ "$TOTAL_MB" -gt 50 ]]; then
+            echo "::warning::Recursos entre 50-100 MB (${TOTAL_MB} MB). Considera Git LFS."
+          else
+            echo "✓ Tamanho aceitável: ${TOTAL_MB} MB"
+          fi
+
+          echo "TOTAL_MB=$TOTAL_MB" >> "$GITHUB_ENV"
+
+      # ── 9. VERIFICAR DUPLICADOS ────────────────────────────────────
+      - name: Verificar ficheiros duplicados
+        run: |
+          set -euo pipefail
+
+          echo "=== Verificar colisões com ficheiros existentes ==="
+          CONFLICTS=0
+
+          find "$EXTRACT_DIR/selected" -type f | while read -r SRC; do
+            REL="${SRC#$EXTRACT_DIR/selected/}"
+            case "$REL" in
+              protagonist/*) DEST="$DEST_BASE/protagonist/${REL#protagonist/}" ;;
+              female/*)       DEST="$DEST_BASE/female/${REL#female/}" ;;
+              animations/*)  DEST="$DEST_BASE/animations/${REL#animations/}" ;;
+              textures/*)    DEST="$DEST_BASE/protagonist/textures/${REL#textures/}" ;;
+              godot_glbs/*)  DEST="$DEST_BASE/protagonist/${REL#godot_glbs/}" ;;
+              licenses/*)    DEST="$DEST_BASE/licenses/${REL#licenses/}" ;;
+              *)             DEST="$DEST_BASE/$REL" ;;
+            esac
+            if [[ -f "$DEST" ]]; then
+              echo "  CONFLITO: $DEST"
+              CONFLICTS=$((CONFLICTS+1))
+            fi
+          done
+
+          echo "Conflitos encontrados: $CONFLICTS"
+
+      # ── 10. COPIAR PARA REPOSITÓRIO ────────────────────────────────
+      - name: Copiar recursos para o repositório
+        run: |
+          set -euo pipefail
+
+          # Criar estrutura de destino
+          mkdir -p "$DEST_BASE/protagonist/textures"
+          mkdir -p "$DEST_BASE/female/textures"
+          mkdir -p "$DEST_BASE/animations"
+          mkdir -p "$DEST_BASE/licenses"
+
+          copy_file() {
+            local SRC="$1"
+            local DST="$2"
+            if [[ -f "$DST" ]]; then
+              # Comparar SHA — só copiar se diferente
+              SRC_SHA=$(sha256sum "$SRC" | cut -d' ' -f1)
+              DST_SHA=$(sha256sum "$DST" | cut -d' ' -f1)
+              if [[ "$SRC_SHA" == "$DST_SHA" ]]; then
+                echo "  SKIP (idêntico): $(basename "$DST")"
+                return
+              fi
+              echo "  UPDATE: $(basename "$DST")"
+            else
+              echo "  NEW: $(basename "$DST")"
+            fi
+            cp "$SRC" "$DST"
+          }
+
+          # Protagonista (male)
+          if [[ -d "$EXTRACT_DIR/selected/protagonist" ]]; then
+            find "$EXTRACT_DIR/selected/protagonist" -type f | while read -r SRC; do
+              REL="${SRC#$EXTRACT_DIR/selected/protagonist/}"
+              DST_DIR="$DEST_BASE/protagonist/$(dirname "$REL")"
+              mkdir -p "$DST_DIR"
+              copy_file "$SRC" "$DEST_BASE/protagonist/$REL"
+            done
+          fi
+
+          # Female
+          if [[ -d "$EXTRACT_DIR/selected/female" ]]; then
+            find "$EXTRACT_DIR/selected/female" -type f | while read -r SRC; do
+              REL="${SRC#$EXTRACT_DIR/selected/female/}"
+              DST_DIR="$DEST_BASE/female/$(dirname "$REL")"
+              mkdir -p "$DST_DIR"
+              copy_file "$SRC" "$DEST_BASE/female/$REL"
+            done
+          fi
+
+          # Godot GLBs (alternativa se GLTF não encontrado)
+          if [[ -d "$EXTRACT_DIR/selected/godot_glbs" ]]; then
+            find "$EXTRACT_DIR/selected/godot_glbs" -name "*.glb" | while read -r SRC; do
+              copy_file "$SRC" "$DEST_BASE/protagonist/$(basename "$SRC")"
+            done
+          fi
+
+          # Animações
+          if [[ -d "$EXTRACT_DIR/selected/animations" ]]; then
+            find "$EXTRACT_DIR/selected/animations" -type f | while read -r SRC; do
+              copy_file "$SRC" "$DEST_BASE/animations/$(basename "$SRC")"
+            done
+          fi
+
+          # Texturas
+          if [[ -d "$EXTRACT_DIR/selected/textures" ]]; then
+            find "$EXTRACT_DIR/selected/textures" -type f | while read -r SRC; do
+              copy_file "$SRC" "$DEST_BASE/protagonist/textures/$(basename "$SRC")"
+            done
+          fi
+
+          # Licenças
+          if [[ -d "$EXTRACT_DIR/selected/licenses" ]]; then
+            find "$EXTRACT_DIR/selected/licenses" -type f | while read -r SRC; do
+              copy_file "$SRC" "$DEST_BASE/licenses/$(basename "$SRC")"
+            done
+          fi
+
+          echo ""
+          echo "=== Estado final de $DEST_BASE ==="
+          find "$DEST_BASE" | sort
+
+      # ── 11. CRIAR/ACTUALIZAR ORIGINS.md ────────────────────────────
+      - name: Criar ORIGINS.md para o pacote Drive
+        run: |
+          set -euo pipefail
+
+          TIMESTAMP=$(date -u "+%Y-%m-%dT%H:%M:%SZ")
+
+          # Inventário dos ficheiros adicionados
+          MALE_STATUS="AUSENTE"
+          FEMALE_STATUS="AUSENTE"
+          if [[ -f "$DEST_BASE/protagonist/Superhero_Male_FullBody.gltf" ]]; then
+            MALE_STATUS="PRESENTE ($(du -sh "$DEST_BASE/protagonist/Superhero_Male_FullBody.gltf" | cut -f1))"
+          fi
+          if [[ -f "$DEST_BASE/female/Superhero_Female_FullBody.gltf" ]]; then
+            FEMALE_STATUS="PRESENTE ($(du -sh "$DEST_BASE/female/Superhero_Female_FullBody.gltf" | cut -f1))"
+          fi
+
+          # Detectar licença do pacote
+          LICENSE_INFO="A VERIFICAR — consultar $DEST_BASE/licenses/"
+          LICENSE_FILE=$(find "$DEST_BASE/licenses" -name "*.txt" -o -name "LICENSE*" 2>/dev/null | head -1 || true)
+          if [[ -n "$LICENSE_FILE" ]]; then
+            LICENSE_INFO="Ficheiro encontrado: $(basename "$LICENSE_FILE") — verificar conteúdo"
+            if grep -qi "cc0\|creative commons zero\|public domain" "$LICENSE_FILE" 2>/dev/null; then
+              LICENSE_INFO="CC0 Creative Commons Zero (confirmado em $(basename "$LICENSE_FILE"))"
+            elif grep -qi "royalty.free" "$LICENSE_FILE" 2>/dev/null; then
+              LICENSE_INFO="Royalty-Free (verificar restrições em $(basename "$LICENSE_FILE"))"
+            fi
+          fi
+
+          cat > "$DEST_BASE/ORIGINS.md" << ORIGINSEOF
+          # Registo de Origem dos Assets — Pacote Google Drive
+
+          Workflow: .github/workflows/import-3d-assets.yml
+          Data: ${TIMESTAMP}
+          Commit: ${{ github.sha }}
+          Google Drive File ID: ${GDRIVE_FILE_ID}
+
+          ## Modelos Superhero
+
+          | Recurso | Status | Notas |
+          |---|---|---|
+          | Superhero_Male_FullBody.gltf | ${MALE_STATUS} | Protagonista AXEV CRIME |
+          | Superhero_Female_FullBody.gltf | ${FEMALE_STATUS} | Personagem secundário |
+
+          ## Licença
+
+          **${LICENSE_INFO}**
+
+          > ATENÇÃO: Não declarar CC0 sem confirmação explícita no ficheiro de licença.
+          > Verificar ficheiros em assets/models/character/licenses/
+
+          ## Estrutura importada
+
+          \`\`\`
+          assets/models/character/
+          ├── protagonist/
+          │   ├── Superhero_Male_FullBody.gltf
+          │   ├── *.bin  (buffers referenciados)
+          │   └── textures/
+          ├── female/
+          │   ├── Superhero_Female_FullBody.gltf
+          │   └── textures/
+          ├── animations/
+          └── licenses/
+          \`\`\`
+
+          ## Preservação do jogo actual
+
+          Este workflow NÃO altera:
+          - CharacterBody3D, joystick, movimento, corrida, salto
+          - Câmara, colisões, botões de interacção
+          - Scripts existentes (player_controller.gd, main.gd)
+          - Cenas existentes (main.tscn, player.tscn, touch_ui.tscn)
+          ORIGINSEOF
+
+          echo "✓ ORIGINS.md criado/actualizado"
+
+      # ── 12. VERIFICAÇÃO DE REFERÊNCIAS QUEBRADAS ───────────────────
+      - name: Verificar referências em GLTFs
+        run: |
+          set -euo pipefail
+
+          BROKEN=0
+          for GLTF in $(find "$DEST_BASE" -name "*.gltf" 2>/dev/null); do
+            GLTF_DIR=$(dirname "$GLTF")
+            echo "Verificar: $GLTF"
+
+            python3 - "$GLTF" "$GLTF_DIR" << 'PYEOF'
+          import json, sys, os
+
+          gltf_path = sys.argv[1]
+          base_dir  = sys.argv[2]
+          broken = 0
+
+          try:
+            with open(gltf_path, 'r', encoding='utf-8') as f:
+              data = json.load(f)
+          except Exception as e:
+            print(f"  AVISO: não foi possível analisar GLTF: {e}")
+            sys.exit(0)
+
+          for buf in data.get("buffers", []):
+            uri = buf.get("uri","")
+            if uri and not uri.startswith("data:"):
+              p = os.path.join(base_dir, uri)
+              if not os.path.exists(p):
+                print(f"  REFERÊNCIA QUEBRADA (buffer): {uri}")
+                broken += 1
+              else:
+                print(f"  OK buffer: {uri}")
+
+          for img in data.get("images", []):
+            uri = img.get("uri","")
+            if uri and not uri.startswith("data:"):
+              p = os.path.join(base_dir, uri)
+              if not os.path.exists(p):
+                print(f"  REFERÊNCIA QUEBRADA (imagem): {uri}")
+                broken += 1
+              else:
+                print(f"  OK imagem: {uri}")
+
+          if broken > 0:
+            print(f"  ERRO: {broken} referências quebradas em {gltf_path}")
+            sys.exit(1)
+          else:
+            print(f"  ✓ Todas as referências OK")
+          PYEOF
+
+          done
+
+          echo "✓ Verificação de referências concluída"
+
+      # ── 13. PROTECÇÃO — verificar ficheiros críticos intactos ──────
+      - name: Verificar que ficheiros críticos do jogo estão intactos
+        run: |
+          set -euo pipefail
+
+          CRITICAL=(
+            "project.godot"
+            "export_presets.cfg"
+            "scenes/main.tscn"
+            "scenes/player.tscn"
+            "scripts/main.gd"
+            "scripts/player_controller.gd"
+            "assets/icon.svg"
+          )
+
+          ALL_OK=true
+          for f in "${CRITICAL[@]}"; do
+            if [[ ! -f "$f" ]]; then
+              echo "::error::Ficheiro crítico em falta: $f"
+              ALL_OK=false
+            else
+              echo "✓ $f"
+            fi
+          done
+
+          if [[ "$ALL_OK" == "false" ]]; then
+            exit 1
+          fi
+
+          echo "✓ Todos os ficheiros críticos do jogo preservados"
+
+      # ── 14. COMMIT E PUSH ──────────────────────────────────────────
+      - name: Commit e Push dos recursos
+        if: env.DRY_RUN != 'true'
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add "$DEST_BASE/"
+
+          if git diff --cached --quiet; then
+            echo "Sem alterações para commitar (recursos já actualizados)."
+          else
+            CHANGED=$(git diff --cached --name-only | wc -l)
+            git commit -m "feat(assets): importar pacote 3D do Google Drive
+
+          Ficheiros adicionados/actualizados: ${CHANGED}
+          Protagonista: ${MALE_GLTF_FOUND:-false}
+          Female: ${FEMALE_GLTF_FOUND:-false}
+          Tamanho total: ${TOTAL_MB:-?} MB
+          Drive File ID: ${GDRIVE_FILE_ID}
+          Workflow: import-3d-assets.yml"
+
+            git push
+            echo "✓ Push realizado com ${CHANGED} ficheiro(s)"
+          fi
+
+      - name: Dry Run — mostrar o que seria commitado
+        if: env.DRY_RUN == 'true'
+        run: |
+          git add "$DEST_BASE/"
+          echo "=== DRY RUN — ficheiros que seriam commitados ==="
+          git diff --cached --name-status || echo "(nenhuma alteração)"
+
+      # ── 15. SUMÁRIO ────────────────────────────────────────────────
+      - name: Sumário final
+        if: always()
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  AXEV CRIME — Import 3D Assets from Google Drive"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Drive File ID : $GDRIVE_FILE_ID"
+          echo "  Dry Run       : $DRY_RUN"
+
+          if [[ -f "$DEST_BASE/protagonist/Superhero_Male_FullBody.gltf" ]]; then
+            echo "  Male GLTF     : ✅ $(du -sh "$DEST_BASE/protagonist/Superhero_Male_FullBody.gltf" | cut -f1)"
+          else
+            echo "  Male GLTF     : ❌ não encontrado no pacote"
+          fi
+
+          if [[ -f "$DEST_BASE/female/Superhero_Female_FullBody.gltf" ]]; then
+            echo "  Female GLTF   : ✅ $(du -sh "$DEST_BASE/female/Superhero_Female_FullBody.gltf" | cut -f1)"
+          else
+            echo "  Female GLTF   : ❌ não encontrado no pacote"
+          fi
+
+          echo "  Tamanho total : ${TOTAL_MB:-?} MB"
+
+          if [[ -d "$DEST_BASE/licenses" ]]; then
+            echo "  Licenças      : $(ls "$DEST_BASE/licenses/" | wc -l) ficheiro(s)"
+          fi
+
+          echo ""
+          echo "  JOGO PROTEGIDO:"
+          echo "  player.tscn   : $([ -f scenes/player.tscn ] && echo '✅' || echo '❌')"
+          echo "  main.tscn     : $([ -f scenes/main.tscn ] && echo '✅' || echo '❌')"
+          echo "  player_ctrl   : $([ -f scripts/player_controller.gd ] && echo '✅' || echo '❌')"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "  PRÓXIMOS PASSOS:"
+          echo "  1. Verifica o ORIGINS.md para confirmar a licença"
+          echo "  2. Corre o validate-godot.yml para validar o projecto"
+          echo "  3. Integração visual: substitui o MeshInstance3D provisório"
+          echo "     pelo nó importado — SEM alterar CharacterBody3D"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

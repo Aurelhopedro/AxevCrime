@@ -18,38 +18,41 @@ jobs:
       - name: Checkout repositório
         uses: actions/checkout@v4
 
-      # ── 2. VERIFICAR GLBs DO PERSONAGEM ────────────────────────────
-      # Build falha imediatamente se os GLBs Quaternius não estiverem
-      # presentes. Isto evita builds sem o personagem.
-      - name: Verificar assets Quaternius obrigatórios
+      # ── 2. VERIFICAR PERSONAGEM PRINCIPAL ──────────────────────────
+      # Build falha imediatamente se The_Soldier.glb não estiver presente.
+      - name: Verificar The_Soldier.glb (personagem principal)
         run: |
           set -euo pipefail
           MISSING=0
 
-          if [[ ! -f "assets/models/character/character.glb" ]]; then
-            echo "::error::character.glb não encontrado em assets/models/character/"
-            echo "  → Descarrega de: https://quaternius.com/packs/universalbasecharacters.html"
-            echo "  → Extrai Male_Regular.glb e renomeia para character.glb"
+          if [[ ! -f "assets/models/character/protagonist/The_Soldier.glb" ]]; then
+            echo "::error::The_Soldier.glb não encontrado em assets/models/character/protagonist/"
+            echo "  Este ficheiro é o personagem principal do AXEV CRIME."
+            echo "  Deve ser colocado manualmente ou via workflow de importação."
             MISSING=1
           else
-            echo "✓ character.glb ($(du -sh assets/models/character/character.glb | cut -f1))"
+            SIZE=$(du -sh "assets/models/character/protagonist/The_Soldier.glb" | cut -f1)
+            HEX=$(xxd -l 4 -p "assets/models/character/protagonist/The_Soldier.glb")
+            if [[ "$HEX" == "676c5446" ]]; then
+              echo "✓ The_Soldier.glb — ${SIZE} — GLB válido"
+            else
+              echo "::warning::The_Soldier.glb encontrado mas magic bytes inesperados: $HEX"
+            fi
           fi
 
-          if [[ ! -f "assets/models/character/animations.glb" ]]; then
-            echo "::error::animations.glb não encontrado em assets/models/character/"
-            echo "  → Descarrega de: https://quaternius.com/packs/universalanimationlibrary.html"
-            echo "  → Extrai AnimationLibrary_Godot_Standard.glb e renomeia para animations.glb"
-            MISSING=1
+          # animations.glb é opcional (AnimationPlayer pode estar no GLB do personagem)
+          if [[ -f "assets/models/character/animations.glb" ]]; then
+            echo "✓ animations.glb ($(du -sh assets/models/character/animations.glb | cut -f1)) — biblioteca de animações"
           else
-            echo "✓ animations.glb ($(du -sh assets/models/character/animations.glb | cut -f1))"
+            echo "⚠ animations.glb ausente — usando animações incorporadas em The_Soldier.glb (se existirem)"
           fi
 
           if [[ "$MISSING" -eq 1 ]]; then
             echo ""
-            echo "INSTRUÇÕES COMPLETAS: assets/models/character/README.md"
+            echo "INSTRUÇÕES: colocar The_Soldier.glb em assets/models/character/protagonist/"
             exit 1
           fi
-          echo "Todos os assets do personagem presentes."
+          echo "Assets do personagem verificados."
 
       # ── 3. JAVA 17 ─────────────────────────────────────────────────
       - name: Confirmar Java 17
@@ -318,6 +321,7 @@ jobs:
         run: |
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "  AXEV CRIME — Android Debug Build"
+          echo "  Personagem: The_Soldier.glb"
           echo "  Godot:  4.3-stable | SDK: API 34 | NDK: $ANDROID_NDK_ROOT"
           if [[ -f "build/android/axev_crime.apk" ]]; then
             echo "  RESULTADO: ✓ APK GERADO ($(du -sh build/android/axev_crime.apk | cut -f1))"

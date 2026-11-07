@@ -1,0 +1,332 @@
+name: Audit Soldier GLB
+
+# ============================================================================
+# AXEV CRIME — Auditoria de The_Soldier.glb
+# ============================================================================
+#
+# Inspecciona a estrutura interna do GLB sem modificar nada no repositório.
+# Produz um relatório completo:
+#   - Esqueleto (Skeleton3D / bones)
+#   - Animações incorporadas (nomes reais)
+#   - Materiais e texturas
+#   - Dimensões e escala recomendada
+#   - Compatibilidade com Godot 4.3
+#
+# COMO USAR: GitHub Actions → "Audit Soldier GLB" → Run workflow
+# ============================================================================
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit-glb:
+    name: Inspecionar The_Soldier.glb
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    env:
+      GLB_PATH: "assets/models/character/protagonist/The_Soldier.glb"
+
+    steps:
+      # ── 1. CHECKOUT ────────────────────────────────────────────────
+      - name: Checkout repositório
+        uses: actions/checkout@v4
+
+      # ── 2. VERIFICAR EXISTÊNCIA ────────────────────────────────────
+      - name: Verificar existência do GLB
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f "$GLB_PATH" ]]; then
+            echo "::error::Ficheiro não encontrado: $GLB_PATH"
+            echo "Conteúdo de assets/models/character/protagonist/:"
+            ls -la "assets/models/character/protagonist/" || echo "(directório vazio ou inexistente)"
+            exit 1
+          fi
+
+          FILE_SIZE=$(wc -c < "$GLB_PATH")
+          echo "✓ Ficheiro encontrado: $GLB_PATH"
+          echo "  Tamanho: $FILE_SIZE bytes ($(du -sh "$GLB_PATH" | cut -f1))"
+
+          # Verificar magic bytes GLB: 0x46546C67 = "glTF" little-endian
+          HEX=$(xxd -l 4 -p "$GLB_PATH")
+          echo "  Magic bytes: $HEX"
+          if [[ "$HEX" == "676c5446" ]]; then
+            echo "  Formato: ✓ GLB (Binary glTF)"
+          else
+            echo "  ::warning:: Magic bytes inesperados — pode não ser GLB"
+          fi
+
+      # ── 3. INSTALAR PYTHON + PYGLTFLIB ─────────────────────────────
+      - name: Instalar dependências Python
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends python3 python3-pip xxd
+          pip3 install --quiet pygltflib
+
+      # ── 4. AUDITORIA COMPLETA ──────────────────────────────────────
+      - name: Auditoria estrutural do GLB
+        run: |
+          python3 << 'PYEOF'
+          import sys, os, struct, json
+
+          GLB_PATH = "assets/models/character/protagonist/The_Soldier.glb"
+
+          print("=" * 70)
+          print("  AXEV CRIME — Auditoria de The_Soldier.glb")
+          print("=" * 70)
+          print()
+
+          # ── Leitura manual do header GLB ──────────────────────────────────
+          with open(GLB_PATH, "rb") as f:
+              raw = f.read()
+
+          magic, version, length = struct.unpack_from("<III", raw, 0)
+          print(f"Header GLB:")
+          print(f"  Magic   : 0x{magic:08X} ({'OK — glTF' if magic == 0x46546C67 else 'INVÁLIDO'})")
+          print(f"  Versão  : {version}")
+          print(f"  Tamanho : {length} bytes ({length/1024/1024:.2f} MB)")
+          print()
+
+          # ── Chunk JSON ────────────────────────────────────────────────────
+          chunk0_len, chunk0_type = struct.unpack_from("<II", raw, 12)
+          if chunk0_type != 0x4E4F534A:  # "JSON"
+              print("ERRO: Chunk 0 não é JSON")
+              sys.exit(1)
+
+          json_data = raw[20:20 + chunk0_len]
+          try:
+              gltf = json.loads(json_data)
+          except Exception as e:
+              print(f"ERRO ao analisar JSON do GLB: {e}")
+              sys.exit(1)
+
+          print(f"JSON chunk: {chunk0_len} bytes")
+          print()
+
+          # ── Chunk BIN ─────────────────────────────────────────────────────
+          bin_offset = 20 + chunk0_len
+          if bin_offset + 8 <= len(raw):
+              bin_len, bin_type = struct.unpack_from("<II", raw, bin_offset)
+              bin_label = "BIN (buffer binário)" if bin_type == 0x004E4942 else f"tipo 0x{bin_type:08X}"
+              print(f"BIN chunk : {bin_len} bytes ({bin_len/1024/1024:.2f} MB) — {bin_label}")
+          print()
+
+          # ── Nós da cena ───────────────────────────────────────────────────
+          nodes = gltf.get("nodes", [])
+          print(f"Nós na cena : {len(nodes)}")
+          for i, node in enumerate(nodes[:30]):
+              name = node.get("name", f"node_{i}")
+              extras = []
+              if "mesh" in node: extras.append("mesh")
+              if "skin" in node: extras.append("skin")
+              if "children" in node: extras.append(f"{len(node['children'])} filhos")
+              print(f"  [{i:2d}] {name:<40} {', '.join(extras)}")
+          if len(nodes) > 30:
+              print(f"  ... (+{len(nodes)-30} nós)")
+          print()
+
+          # ── Meshes ────────────────────────────────────────────────────────
+          meshes = gltf.get("meshes", [])
+          print(f"Meshes : {len(meshes)}")
+          for i, mesh in enumerate(meshes):
+              name = mesh.get("name", f"mesh_{i}")
+              prims = mesh.get("primitives", [])
+              print(f"  [{i}] {name} — {len(prims)} primitive(s)")
+          print()
+
+          # ── Esqueleto / Joints ────────────────────────────────────────────
+          skins = gltf.get("skins", [])
+          print(f"Skins (Skeleton3D) : {len(skins)}")
+          for i, skin in enumerate(skins):
+              name = skin.get("name", f"skin_{i}")
+              joints = skin.get("joints", [])
+              print(f"  [{i}] {name} — {len(joints)} bones/joints")
+              # Listar nomes dos bones (via nós)
+              bone_names = []
+              for j in joints[:40]:
+                  if j < len(nodes):
+                      bone_names.append(nodes[j].get("name", f"node_{j}"))
+              for b in bone_names[:20]:
+                  print(f"       bone: {b}")
+              if len(joints) > 20:
+                  print(f"       ... (+{len(joints)-20} bones)")
+          print()
+
+          # ── Animações ─────────────────────────────────────────────────────
+          animations = gltf.get("animations", [])
+          print(f"Animações incorporadas : {len(animations)}")
+          if animations:
+              for i, anim in enumerate(animations):
+                  name = anim.get("name", f"anim_{i}")
+                  channels = anim.get("channels", [])
+                  samplers  = anim.get("samplers", [])
+                  print(f"  [{i:2d}] \"{name}\"  ({len(channels)} channels, {len(samplers)} samplers)")
+          else:
+              print("  (nenhuma animação incorporada)")
+              print("  → Usar animations.glb externo via AnimationRoot")
+          print()
+
+          # ── Materiais ─────────────────────────────────────────────────────
+          materials = gltf.get("materials", [])
+          print(f"Materiais : {len(materials)}")
+          for i, mat in enumerate(materials):
+              name = mat.get("name", f"mat_{i}")
+              pbr = mat.get("pbrMetallicRoughness", {})
+              has_tex = "baseColorTexture" in pbr
+              print(f"  [{i}] {name}  {'(textura base)' if has_tex else '(cor sólida)'}")
+          print()
+
+          # ── Texturas e Imagens ────────────────────────────────────────────
+          textures = gltf.get("textures", [])
+          images   = gltf.get("images", [])
+          print(f"Texturas : {len(textures)} | Imagens : {len(images)}")
+          for i, img in enumerate(images):
+              name = img.get("name", f"img_{i}")
+              mime = img.get("mimeType", "?")
+              uri  = img.get("uri", "(incorporada no BIN)")
+              bv   = img.get("bufferView", None)
+              src  = f"bufferView {bv}" if bv is not None else uri
+              print(f"  [{i}] {name}  {mime}  {src}")
+          print()
+
+          # ── Dimensões (bounding box aproximada via accessors) ─────────────
+          accessors  = gltf.get("accessors", [])
+          min_xyz    = [float("inf")] * 3
+          max_xyz    = [float("-inf")] * 3
+          found_pos  = False
+          for acc in accessors:
+              if acc.get("type") == "VEC3":
+                  if "min" in acc and "max" in acc:
+                      for axis in range(3):
+                          if acc["min"][axis] < min_xyz[axis]: min_xyz[axis] = acc["min"][axis]
+                          if acc["max"][axis] > max_xyz[axis]: max_xyz[axis] = acc["max"][axis]
+                      found_pos = True
+
+          if found_pos and all(v != float("inf") for v in min_xyz):
+              sx = max_xyz[0] - min_xyz[0]
+              sy = max_xyz[1] - min_xyz[1]
+              sz = max_xyz[2] - min_xyz[2]
+              print(f"Dimensões estimadas (bounding box):")
+              print(f"  X: {min_xyz[0]:.3f} → {max_xyz[0]:.3f}  (largura {sx:.3f})")
+              print(f"  Y: {min_xyz[1]:.3f} → {max_xyz[1]:.3f}  (altura  {sy:.3f})")
+              print(f"  Z: {min_xyz[2]:.3f} → {max_xyz[2]:.3f}  (prof.   {sz:.3f})")
+              print()
+
+              # Recomendação de escala
+              print(f"Recomendação de escala (CapsuleShape3D height=1.8m):")
+              if sy < 0.1:
+                  print(f"  MODELO MUITO PEQUENO (altura {sy:.4f}) — provável unidade em cm")
+                  print(f"  → Escala recomendada: {1.8/max(sy,0.0001):.4f}")
+              elif sy > 100:
+                  print(f"  MODELO GIGANTE (altura {sy:.1f}) — provável unidade em cm")
+                  scale = 1.8 / sy
+                  print(f"  → Escala recomendada: {scale:.5f} ≈ {scale:.3f}")
+                  print(f"  → Usar transform scale = Vector3({scale:.4f}, {scale:.4f}, {scale:.4f}) em player.tscn")
+              elif 1.5 <= sy <= 2.5:
+                  print(f"  ✓ ESCALA ADEQUADA (altura {sy:.3f}m) — escala (1,1,1) deverá funcionar")
+              else:
+                  scale = 1.8 / sy
+                  print(f"  Escala sugerida: {scale:.4f} (altura actual: {sy:.3f})")
+              print()
+
+              # Recomendação de origin.y
+              print(f"Recomendação de posicionamento (origin Y):")
+              if min_xyz[1] >= -0.05 and min_xyz[1] <= 0.05:
+                  print(f"  Pé do modelo em Y≈0 — origin.y = -0.9 (centro da cápsula)")
+              elif min_xyz[1] < 0:
+                  print(f"  Pé do modelo em Y={min_xyz[1]:.3f} — origin.y = {-0.9 - min_xyz[1]:.3f}")
+              else:
+                  print(f"  Pé do modelo em Y={min_xyz[1]:.3f} — origin.y = {-0.9 - min_xyz[1]:.3f}")
+          print()
+
+          # ── Sumário de compatibilidade ────────────────────────────────────
+          print("=" * 70)
+          print("  SUMÁRIO DE COMPATIBILIDADE GODOT 4.3")
+          print("=" * 70)
+          print(f"  GLB válido         : {'✓' if magic == 0x46546C67 else '✗'}")
+          print(f"  Esqueleto          : {'✓ ' + str(len(skins)) + ' skin(s)' if skins else '✗ nenhum skeleton'}")
+          print(f"  Animações          : {'✓ ' + str(len(animations)) + ' incorporada(s)' if animations else '⚠ nenhuma — usar animations.glb externo'}")
+          print(f"  Texturas           : {'✓ ' + str(len(images)) + ' imagem(ns) incorporada(s)' if images else '⚠ sem texturas (material sólido)'}")
+          print(f"  Materiais          : {'✓ ' + str(len(materials)) if materials else '(nenhum)'}")
+          print()
+          print("  NOMES DE ANIMAÇÕES NO CONTROLADOR:")
+          if animations:
+              anim_names = [a.get("name","?") for a in animations]
+              expected = ["Idle","Walk","Jog","Sprint","Jump","Fall","Land"]
+              for exp in expected:
+                  found = exp in anim_names or ("Armature|"+exp) in anim_names
+                  alt   = next((n for n in anim_names if exp.lower() in n.lower()), None)
+                  if found:
+                      print(f"    {exp:<10} : ✓ encontrado")
+                  elif alt:
+                      print(f"    {exp:<10} : ⚠ não exacto — nome real: '{alt}'")
+                  else:
+                      print(f"    {exp:<10} : ✗ não encontrado")
+          else:
+              print("    (sem animações incorporadas — requer animations.glb externo)")
+          print()
+          print("  CAMINHO NO REPOSITÓRIO:")
+          print(f"    res://assets/models/character/protagonist/The_Soldier.glb")
+          print("  REFERENCIADO EM:")
+          print("    scenes/player.tscn → CharacterMesh → The_Soldier (instance)")
+          print("=" * 70)
+          PYEOF
+
+      # ── 5. UPLOAD DO RELATÓRIO ─────────────────────────────────────
+      - name: Guardar relatório como artefacto
+        if: always()
+        run: |
+          python3 << 'PYEOF' > /tmp/audit_report.txt 2>&1
+          import sys, struct, json
+
+          GLB_PATH = "assets/models/character/protagonist/The_Soldier.glb"
+
+          with open(GLB_PATH, "rb") as f:
+              raw = f.read()
+
+          magic, version, length = struct.unpack_from("<III", raw, 0)
+          chunk0_len, chunk0_type = struct.unpack_from("<II", raw, 12)
+          json_data = raw[20:20 + chunk0_len]
+          gltf = json.loads(json_data)
+
+          nodes       = gltf.get("nodes", [])
+          skins       = gltf.get("skins", [])
+          animations  = gltf.get("animations", [])
+          materials   = gltf.get("materials", [])
+          images      = gltf.get("images", [])
+
+          print("AXEV CRIME — GLB Audit Report")
+          print(f"File: {GLB_PATH}")
+          print(f"Size: {length} bytes")
+          print(f"Nodes: {len(nodes)}")
+          print(f"Skins: {len(skins)}")
+          print(f"Animations: {len(animations)}")
+          print(f"Materials: {len(materials)}")
+          print(f"Images: {len(images)}")
+          print()
+          print("Animation names:")
+          for a in animations:
+              print(f"  {a.get('name','?')}")
+          print()
+          print("Bone names (first skin):")
+          if skins:
+              for j in skins[0].get("joints",[])[:30]:
+                  if j < len(nodes):
+                      print(f"  {nodes[j].get('name','?')}")
+          PYEOF
+
+          cat /tmp/audit_report.txt
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soldier-glb-audit-report
+          path: /tmp/audit_report.txt
+          retention-days: 30
+          if-no-files-found: ignore

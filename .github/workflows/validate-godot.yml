@@ -16,11 +16,16 @@ concurrency:
   group: godot-validation-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  GODOT_VERSION: "4.3-stable"
+  GODOT_BIN: /usr/local/bin/godot
+  EXPORT_TEMPLATES_DIR: $HOME/.local/share/godot/export_templates/4.3.stable
+
 jobs:
   validate:
     name: Godot 4.3 Headless Validation
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -47,9 +52,25 @@ jobs:
           unzip -q /tmp/godot.zip -d /tmp/godot
           sudo install -m 0755 \
             /tmp/godot/Godot_v4.3-stable_linux.x86_64 \
-            /usr/local/bin/godot
+            "$GODOT_BIN"
 
           godot --version
+
+      - name: Install Godot 4.3 export templates
+        run: |
+          set -euo pipefail
+
+          wget -q \
+            "https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz" \
+            -O /tmp/templates.tpz
+
+          mkdir -p "$EXPORT_TEMPLATES_DIR"
+          unzip -q /tmp/templates.tpz -d /tmp/templates_extracted
+
+          mv /tmp/templates_extracted/templates/* "$EXPORT_TEMPLATES_DIR/"
+
+          echo "Export templates installed:"
+          ls "$EXPORT_TEMPLATES_DIR/" | grep -E "web" || echo "(no web template listed — verify template archive)"
 
       - name: Verify required files
         run: |
@@ -57,6 +78,7 @@ jobs:
 
           required_files=(
             "project.godot"
+            "export_presets.cfg"
             "scenes/main.tscn"
             "scenes/player.tscn"
             "scripts/main.gd"
@@ -71,6 +93,8 @@ jobs:
             fi
             echo "OK: $file"
           done
+
+      # ── VALIDAÇÃO HEADLESS ─────────────────────────────────────────
 
       - name: Import project resources
         timeout-minutes: 5
@@ -125,10 +149,115 @@ jobs:
 
           echo "Main scene startup test completed without detected critical errors."
 
-      - name: Validation summary
+      # ── EXPORTAÇÃO WEB ─────────────────────────────────────────────
+
+      - name: Export project to Web
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+
+          mkdir -p build/web
+
+          timeout 300s godot \
+            --headless \
+            --path "$GITHUB_WORKSPACE" \
+            --export-release "Web" \
+            "build/web/index.html" 2>&1 | tee /tmp/godot_export.log
+          status=${PIPESTATUS[0]}
+
+          if grep -Eiq \
+            '(^ERROR:|SCRIPT ERROR:|Parse Error:|Failed to load script|Failed loading resource)' \
+            /tmp/godot_export.log; then
+            echo "::error::Errors detected during Web export"
+            exit 1
+          fi
+
+          if [[ "$status" -ne 0 ]]; then
+            echo "::error::Web export failed with exit code $status"
+            exit 1
+          fi
+
+          echo "Web export completed."
+
+      - name: Verify Web export output
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f "build/web/index.html" ]]; then
+            echo "::error::build/web/index.html not found — export did not produce output"
+            exit 1
+          fi
+
+          if [[ ! -s "build/web/index.html" ]]; then
+            echo "::error::build/web/index.html is empty"
+            exit 1
+          fi
+
+          required_web_files=(
+            "build/web/index.html"
+          )
+
+          for file in "${required_web_files[@]}"; do
+            if [[ ! -f "$file" ]]; then
+              echo "::error::Expected export file missing: $file"
+              exit 1
+            fi
+            echo "OK: $file ($(wc -c < "$file") bytes)"
+          done
+
+          echo "--- Web export directory contents ---"
+          ls -lh build/web/
+
+          echo "Web export verification passed."
+
+      - name: Upload Web export artefact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: axev-crime-web-export
+          path: build/web/
+          retention-days: 7
+
+      # ── PUBLICAÇÃO VERCEL (condicional — requer VERCEL_TOKEN) ───────
+
+      - name: Deploy to Vercel
+        if: ${{ github.ref == 'refs/heads/main' && secrets.VERCEL_TOKEN != '' }}
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: team_d9e3cG3agie2arGYiSLU4Ews
+          VERCEL_PROJECT_ID: prj_yVmlCjThD82Qj1vJvgvOxC9dqmMa
+        run: |
+          set -euo pipefail
+
+          npm install -g vercel@latest --quiet
+
+          vercel deploy build/web \
+            --token "$VERCEL_TOKEN" \
+            --scope "$VERCEL_ORG_ID" \
+            --yes \
+            --prod 2>&1 | tee /tmp/vercel_deploy.log
+          status=${PIPESTATUS[0]}
+
+          if [[ "$status" -ne 0 ]]; then
+            echo "::error::Vercel deployment failed with exit code $status"
+            exit 1
+          fi
+
+          echo "Deployment to Vercel completed."
+
+      # ── SUMÁRIO ────────────────────────────────────────────────────
+
+      - name: Validation and export summary
         if: success()
         run: |
-          echo "AXEV CRIME validation completed."
-          echo "Godot version: 4.3-stable"
-          echo "Resource import: passed"
-          echo "Main scene startup: passed"
+          echo "AXEV CRIME — workflow completed."
+          echo "Godot version:        4.3-stable"
+          echo "Resource import:      passed"
+          echo "Main scene startup:   passed"
+          echo "Web export:           passed"
+          echo "build/web/index.html: present"
+          if [[ -n "${VERCEL_TOKEN:-}" ]]; then
+            echo "Vercel deployment:    executed"
+          else
+            echo "Vercel deployment:    skipped (VERCEL_TOKEN not configured)"
+          fi

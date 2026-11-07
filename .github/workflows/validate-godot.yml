@@ -16,11 +16,6 @@ concurrency:
   group: godot-validation-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  GODOT_VERSION: "4.3-stable"
-  GODOT_BIN: /usr/local/bin/godot
-  EXPORT_TEMPLATES_DIR: /root/.local/share/godot/export_templates/4.3.stable
-
 jobs:
   validate:
     name: Godot 4.3 Headless Validation
@@ -52,13 +47,15 @@ jobs:
           unzip -q /tmp/godot.zip -d /tmp/godot
           sudo install -m 0755 \
             /tmp/godot/Godot_v4.3-stable_linux.x86_64 \
-            "$GODOT_BIN"
+            /usr/local/bin/godot
 
           godot --version
 
       - name: Install Godot 4.3 export templates
         run: |
           set -euo pipefail
+
+          TEMPLATES_DIR="$HOME/.local/share/godot/export_templates/4.3.stable"
 
           wget -q \
             "https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz" \
@@ -67,9 +64,6 @@ jobs:
           mkdir -p /tmp/templates_extracted
           unzip -q /tmp/templates.tpz -d /tmp/templates_extracted
 
-          echo "--- Contents of extracted archive ---"
-          find /tmp/templates_extracted -type f | sort
-
           TEMPLATE_SRC=$(find /tmp/templates_extracted -type d -name "templates" | head -1)
 
           if [[ -z "$TEMPLATE_SRC" ]]; then
@@ -77,16 +71,17 @@ jobs:
             exit 1
           fi
 
-          echo "Template source directory: $TEMPLATE_SRC"
-          mkdir -p "$EXPORT_TEMPLATES_DIR"
-          cp -r "$TEMPLATE_SRC"/. "$EXPORT_TEMPLATES_DIR/"
+          mkdir -p "$TEMPLATES_DIR"
+          cp -r "$TEMPLATE_SRC"/. "$TEMPLATES_DIR/"
 
-          echo "--- Installed template files ---"
-          ls -lh "$EXPORT_TEMPLATES_DIR/"
+          echo "Templates installed to: $TEMPLATES_DIR"
+          ls -lh "$TEMPLATES_DIR/" | grep web || echo "(no web files found)"
 
       - name: Verify Web export templates
         run: |
           set -euo pipefail
+
+          TEMPLATES_DIR="$HOME/.local/share/godot/export_templates/4.3.stable"
 
           required_templates=(
             "web_nothreads_debug.zip"
@@ -94,10 +89,10 @@ jobs:
           )
 
           for tpl in "${required_templates[@]}"; do
-            if [[ ! -f "$EXPORT_TEMPLATES_DIR/$tpl" ]]; then
-              echo "::error::Required Web export template missing: $EXPORT_TEMPLATES_DIR/$tpl"
-              echo "Available files in template directory:"
-              ls "$EXPORT_TEMPLATES_DIR/" || echo "(directory empty or missing)"
+            if [[ ! -f "$TEMPLATES_DIR/$tpl" ]]; then
+              echo "::error::Required Web export template missing: $TEMPLATES_DIR/$tpl"
+              echo "Available files:"
+              ls "$TEMPLATES_DIR/" || echo "(directory empty or missing)"
               exit 1
             fi
             echo "OK: $tpl"

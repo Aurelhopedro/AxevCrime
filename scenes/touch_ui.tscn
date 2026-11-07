@@ -50,14 +50,11 @@ theme_override_constants/separation = 12
 [node name="BtnJump" type="Button" parent="Buttons"]
 custom_minimum_size = Vector2(140, 100)
 text = "JUMP"
-flat = false
 
 [node name="BtnRun" type="Button" parent="Buttons"]
 custom_minimum_size = Vector2(140, 100)
 text = "RUN"
-flat = false
 
 [node name="BtnInteract" type="Button" parent="Buttons"]
 custom_minimum_size = Vector2(140, 80)
 text = "?"
-flat = false

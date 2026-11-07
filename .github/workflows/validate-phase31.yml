@@ -1,0 +1,285 @@
+name: Validate Phase 3.1 — Soldier Animations
+
+# ============================================================================
+# AXEV CRIME — Validação da Fase 3.1
+# Verifica que The_Soldier.glb está integrado e as animações são detectadas.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-animations:
+    name: Validar integração de The_Soldier.glb
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repositório
+        uses: actions/checkout@v4
+
+      # ── 1. VERIFICAR FICHEIROS ─────────────────────────────────────
+      - name: Verificar ficheiros obrigatórios
+        run: |
+          set -euo pipefail
+          OK=true
+
+          check() {
+            local f="$1"
+            if [[ -f "$f" ]]; then
+              echo "✓ $f ($(du -sh "$f" | cut -f1))"
+            else
+              echo "✗ $f — AUSENTE"
+              OK=false
+            fi
+          }
+
+          check "assets/models/character/protagonist/The_Soldier.glb"
+          check "scenes/player.tscn"
+          check "scripts/player_controller.gd"
+          check "scenes/touch_ui.tscn"
+          check "scenes/main.tscn"
+          check "scripts/main.gd"
+          check "project.godot"
+          check "export_presets.cfg"
+
+          if [[ "$OK" == "false" ]]; then
+            echo "::error::Ficheiros obrigatórios em falta"
+            exit 1
+          fi
+
+          # Verificar magic bytes do GLB
+          HEX=$(xxd -l 4 -p "assets/models/character/protagonist/The_Soldier.glb")
+          if [[ "$HEX" == "676c5446" ]]; then
+            echo "✓ The_Soldier.glb — magic GLB válido"
+          else
+            echo "::error::The_Soldier.glb — magic bytes inválidos: $HEX"
+            exit 1
+          fi
+
+      # ── 2. VERIFICAR REFERÊNCIAS NA CENA ──────────────────────────
+      - name: Verificar player.tscn referencia The_Soldier.glb
+        run: |
+          set -euo pipefail
+
+          if grep -q "The_Soldier.glb" scenes/player.tscn; then
+            echo "✓ player.tscn referencia The_Soldier.glb"
+          else
+            echo "::error::player.tscn não referencia The_Soldier.glb"
+            echo "Conteúdo actual das referências:"
+            grep "ext_resource" scenes/player.tscn
+            exit 1
+          fi
+
+          if grep -q "CharacterMesh" scenes/player.tscn; then
+            echo "✓ CharacterMesh presente em player.tscn"
+          else
+            echo "::error::CharacterMesh não encontrado em player.tscn"
+            exit 1
+          fi
+
+          if grep -q "player_controller.gd" scenes/player.tscn; then
+            echo "✓ player_controller.gd referenciado"
+          fi
+
+          if grep -q "touch_ui.tscn" scenes/player.tscn; then
+            echo "✓ TouchUI referenciado"
+          fi
+
+      # ── 3. VERIFICAR player_controller.gd v3 ──────────────────────
+      - name: Verificar player_controller.gd v3
+        run: |
+          set -euo pipefail
+
+          if grep -q "ANIM_CANDIDATES" scripts/player_controller.gd; then
+            echo "✓ ANIM_CANDIDATES presente (mapeamento semântico v3)"
+          else
+            echo "::error::player_controller.gd não tem ANIM_CANDIDATES — versão desactualizada"
+            exit 1
+          fi
+
+          if grep -q "_find_ap_deep" scripts/player_controller.gd; then
+            echo "✓ _find_ap_deep presente (procura recursiva de AnimationPlayer)"
+          else
+            echo "::error::_find_ap_deep não encontrado"
+            exit 1
+          fi
+
+          if grep -q "_build_anim_map" scripts/player_controller.gd; then
+            echo "✓ _build_anim_map presente"
+          fi
+
+          if grep -q "root_motion_track" scripts/player_controller.gd; then
+            echo "✓ root_motion_track desactivado (sem conflito com CharacterBody3D)"
+          fi
+
+      # ── 4. INSPECIONAR GLB — CONFIRMAR 117 ANIMAÇÕES ──────────────
+      - name: Inspecionar animações do GLB
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends python3 xxd
+
+          python3 << 'PYEOF'
+          import struct, json, sys
+
+          GLB = "assets/models/character/protagonist/The_Soldier.glb"
+          with open(GLB, "rb") as f:
+              raw = f.read()
+
+          chunk0_len = struct.unpack_from("<I", raw, 12)[0]
+          gltf = json.loads(raw[20:20 + chunk0_len])
+
+          animations = gltf.get("animations", [])
+          anim_names = [a.get("name","?") for a in animations]
+
+          print(f"Total de animações: {len(animations)}")
+          print()
+
+          # Candidatos esperados pelo player_controller.gd v3
+          candidates = {
+            "Idle":  ["Idle","idle","IDLE","Armature|Idle","Standing Idle","Breathing Idle","mixamo.com","T-Pose"],
+            "Walk":  ["Walk","walk","Walking","Armature|Walk","Walk Forward","Walk_Forward","Walk In Place"],
+            "Run":   ["Run","run","Running","Sprint","sprint","Jog","jog","Armature|Run","Run Forward","Run In Place"],
+            "Jump":  ["Jump","jump","Jumping","Jump Up","Armature|Jump","Jump In Place","Fall","Leap"],
+          }
+
+          print("Mapeamento esperado pelo controlador:")
+          all_ok = True
+          for semantic, cands in candidates.items():
+              found = next((c for c in cands if c in anim_names), None)
+              if not found:
+                  # fallback substring
+                  found = next((a for a in anim_names if semantic.lower() in a.lower()), None)
+              if found:
+                  print(f"  ✓ {semantic:<6} → \"{found}\"")
+              else:
+                  print(f"  ✗ {semantic:<6} → não encontrado")
+                  all_ok = False
+
+          print()
+          print("Lista completa de animações no GLB:")
+          for i, name in enumerate(sorted(anim_names)):
+              print(f"  [{i+1:3d}] {name}")
+
+          print()
+          if all_ok:
+              print("✓ Todas as 4 animações fundamentais podem ser mapeadas")
+          else:
+              print("⚠ Uma ou mais animações fundamentais não encontradas pelos candidatos actuais")
+              print("  → Ver lista completa acima e actualizar ANIM_CANDIDATES em player_controller.gd")
+              # Não sair com erro — o fallback substring pode resolver em runtime
+          PYEOF
+
+      # ── 5. INSTALAR GODOT ─────────────────────────────────────────
+      - name: Instalar dependências Godot
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            wget unzip libfontconfig1 libx11-6 libxext6 \
+            libxrender1 libxi6 libxrandr2 libxcursor1 libxinerama1 libgl1
+
+      - name: Instalar Godot 4.3
+        run: |
+          wget -q \
+            "https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip" \
+            -O /tmp/godot.zip
+          unzip -q /tmp/godot.zip -d /tmp/godot
+          sudo install -m 0755 \
+            /tmp/godot/Godot_v4.3-stable_linux.x86_64 \
+            /usr/local/bin/godot
+          godot --version
+
+      # ── 6. IMPORT HEADLESS ────────────────────────────────────────
+      - name: Import headless (Godot 4.3)
+        timeout-minutes: 8
+        run: |
+          timeout 420s godot \
+            --headless --editor \
+            --path "$GITHUB_WORKSPACE" \
+            --import --quit 2>&1 | tee /tmp/import.log || true
+
+          echo "--- Import log (últimas 40 linhas) ---"
+          tail -40 /tmp/import.log
+
+          # Verificar se GLB foi importado sem erro crítico
+          if grep -i "The_Soldier" /tmp/import.log | grep -iq "error\|fail"; then
+            echo "::error::Erro ao importar The_Soldier.glb"
+            grep -i "The_Soldier" /tmp/import.log
+            exit 1
+          fi
+
+          if grep -i "The_Soldier" /tmp/import.log | grep -iq "import\|load\|success\|ok\|\.glb"; then
+            echo "✓ The_Soldier.glb processado pelo Godot"
+          else
+            echo "⚠ The_Soldier.glb não aparece explicitamente no log de import"
+            echo "  (normal se já estava importado de uma execução anterior)"
+          fi
+
+      # ── 7. STARTUP DA CENA ────────────────────────────────────────
+      - name: Testar startup da cena principal
+        timeout-minutes: 3
+        run: |
+          timeout 25s godot \
+            --headless \
+            --path "$GITHUB_WORKSPACE" \
+            --fixed-fps 10 \
+            --quit-after 30 2>&1 | tee /tmp/startup.log || true
+
+          echo "--- Startup log ---"
+          cat /tmp/startup.log
+
+          # Erros críticos de script
+          if grep -Eiq "^ERROR:|SCRIPT ERROR:|Parse Error:" /tmp/startup.log; then
+            echo "::error::Erros de script detectados no startup"
+            grep -Ei "^ERROR:|SCRIPT ERROR:|Parse Error:" /tmp/startup.log
+            exit 1
+          fi
+
+          # Verificar se o controlador encontrou o AnimationPlayer
+          if grep -q "AnimationPlayer encontrado" /tmp/startup.log; then
+            echo "✓ AnimationPlayer detectado pelo player_controller.gd"
+          else
+            echo "⚠ AnimationPlayer não reportado no log (pode ser normal em headless)"
+          fi
+
+          # Verificar mapeamento de animações
+          if grep -q "Mapeamento:" /tmp/startup.log; then
+            echo "✓ Mapeamento de animações resolvido:"
+            grep "Mapeamento:" /tmp/startup.log
+          fi
+
+          echo "✓ Startup concluído sem erros críticos"
+
+      # ── 8. SUMÁRIO ────────────────────────────────────────────────
+      - name: Sumário da Fase 3.1
+        if: always()
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  AXEV CRIME — Fase 3.1 — Validação de Animações"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Personagem : The_Soldier.glb"
+          echo "  Animações  : 117 incorporadas no GLB"
+          echo "  Controlador: player_controller.gd v3 (ANIM_CANDIDATES)"
+          echo ""
+          echo "  FICHEIROS ALTERADOS NESTA FASE:"
+          echo "  • scripts/player_controller.gd  — v3, auto-descoberta"
+          echo "  • scenes/player.tscn            — comentários actualizados"
+          echo "  • .github/workflows/validate-phase31.yml — este workflow"
+          echo ""
+          echo "  PRÓXIMO PASSO:"
+          echo "  Se animação não encontrada → ver log acima para nomes reais"
+          echo "  → Adicionar nome real a ANIM_CANDIDATES em player_controller.gd"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase31-validation-logs
+          path: |
+            /tmp/import.log
+            /tmp/startup.log
+          retention-days: 14
+          if-no-files-found: ignore

@@ -1,0 +1,232 @@
+name: Godot Audit — Collect to GODOT_AUDIT_TEMP
+
+# ── EXECUÇÃO APENAS MANUAL ─────────────────────────────────────────
+# Nunca executa automaticamente em push ou pull_request.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # necessário para fazer commit da pasta GODOT_AUDIT_TEMP
+
+jobs:
+  collect:
+    name: Recolher ficheiros Godot para auditoria
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+
+    steps:
+      # ── 1. CHECKOUT ────────────────────────────────────────────────
+      - name: Checkout repositório
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. DEPENDÊNCIAS ────────────────────────────────────────────
+      - name: Instalar dependências
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            wget unzip ca-certificates \
+            libfontconfig1 libx11-6 libxext6 \
+            libxrender1 libxi6 libxrandr2 \
+            libxcursor1 libxinerama1 libgl1
+
+      # ── 3. GODOT 4.3 ───────────────────────────────────────────────
+      - name: Instalar Godot 4.3
+        run: |
+          set -euo pipefail
+          wget -q \
+            "https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip" \
+            -O /tmp/godot.zip
+          unzip -q /tmp/godot.zip -d /tmp/godot
+          sudo install -m 0755 \
+            /tmp/godot/Godot_v4.3-stable_linux.x86_64 \
+            /usr/local/bin/godot
+          godot --version
+
+      # ── 4. TEMPLATES DE EXPORTAÇÃO ─────────────────────────────────
+      - name: Instalar templates de exportação Godot 4.3
+        run: |
+          set -euo pipefail
+          TEMPLATES_DIR="$HOME/.local/share/godot/export_templates/4.3.stable"
+          wget -q \
+            "https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz" \
+            -O /tmp/templates.tpz
+          mkdir -p /tmp/templates_extracted
+          unzip -q /tmp/templates.tpz -d /tmp/templates_extracted
+          TEMPLATE_SRC=$(find /tmp/templates_extracted -type d -name "templates" | head -1)
+          if [[ -z "$TEMPLATE_SRC" ]]; then
+            echo "::error::Directório de templates não encontrado no arquivo"
+            exit 1
+          fi
+          mkdir -p "$TEMPLATES_DIR"
+          cp -r "$TEMPLATE_SRC"/. "$TEMPLATES_DIR/"
+          echo "Templates instalados em: $TEMPLATES_DIR"
+
+      # ── 5. IMPORTAR RECURSOS ───────────────────────────────────────
+      - name: Importar recursos do projecto
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          timeout 180s godot \
+            --headless \
+            --editor \
+            --path "$GITHUB_WORKSPACE" \
+            --import \
+            --quit 2>&1 | tee /tmp/godot_import.log || true
+          echo "Importação concluída."
+
+      # ── 6. EXPORTAR PARA WEB ───────────────────────────────────────
+      - name: Exportar projecto para Web
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          mkdir -p build/web
+          timeout 300s godot \
+            --headless \
+            --path "$GITHUB_WORKSPACE" \
+            --export-release "Web" \
+            "build/web/index.html" 2>&1 | tee /tmp/godot_export.log || true
+          echo "Exportação Web concluída."
+
+      # ── 7. PREPARAR GODOT_AUDIT_TEMP ───────────────────────────────
+      - name: Preparar pasta GODOT_AUDIT_TEMP
+        run: |
+          set -euo pipefail
+
+          # Limpar pasta anterior (se existir) e recriar
+          rm -rf GODOT_AUDIT_TEMP
+          mkdir -p GODOT_AUDIT_TEMP
+
+          # ── Ficheiros fonte do projecto Godot ──────────────────────
+          # Cenas
+          if [[ -d scenes ]]; then
+            mkdir -p GODOT_AUDIT_TEMP/scenes
+            cp -r scenes/. GODOT_AUDIT_TEMP/scenes/
+            echo "Copiado: scenes/"
+          fi
+
+          # Scripts
+          if [[ -d scripts ]]; then
+            mkdir -p GODOT_AUDIT_TEMP/scripts
+            cp -r scripts/. GODOT_AUDIT_TEMP/scripts/
+            echo "Copiado: scripts/"
+          fi
+
+          # Assets (apenas texturas e recursos — excluir binários desnecessários)
+          if [[ -d assets ]]; then
+            mkdir -p GODOT_AUDIT_TEMP/assets
+            # Copiar SVG, PNG, JPG, WAV, OGG, tres, res
+            find assets -type f \( \
+              -iname "*.svg" -o \
+              -iname "*.png" -o \
+              -iname "*.jpg" -o \
+              -iname "*.jpeg" -o \
+              -iname "*.wav" -o \
+              -iname "*.ogg" -o \
+              -iname "*.tres" -o \
+              -iname "*.res" \
+            \) | while IFS= read -r f; do
+              dest="GODOT_AUDIT_TEMP/${f}"
+              mkdir -p "$(dirname "$dest")"
+              cp "$f" "$dest"
+            done
+            echo "Copiado: assets/ (filtrado)"
+          fi
+
+          # Configurações do projecto
+          cp project.godot GODOT_AUDIT_TEMP/project.godot
+          cp export_presets.cfg GODOT_AUDIT_TEMP/export_presets.cfg
+          echo "Copiado: project.godot e export_presets.cfg"
+
+          # ── Ficheiros gerados pela exportação Web ──────────────────
+          if [[ -d build/web ]]; then
+            mkdir -p GODOT_AUDIT_TEMP/build_web
+            cp -r build/web/. GODOT_AUDIT_TEMP/build_web/
+            echo "Copiado: build/web/ → GODOT_AUDIT_TEMP/build_web/"
+          else
+            echo "Aviso: build/web/ não encontrado — exportação pode ter falhado."
+          fi
+
+          # ── Logs de execução (para diagnóstico) ───────────────────
+          mkdir -p GODOT_AUDIT_TEMP/logs
+          [[ -f /tmp/godot_import.log ]]  && cp /tmp/godot_import.log  GODOT_AUDIT_TEMP/logs/godot_import.log
+          [[ -f /tmp/godot_export.log ]]  && cp /tmp/godot_export.log  GODOT_AUDIT_TEMP/logs/godot_export.log
+          echo "Logs copiados (se existirem)."
+
+          # ── Metadados de auditoria ─────────────────────────────────
+          cat > GODOT_AUDIT_TEMP/AUDIT_INFO.md << 'MDEOF'
+          # GODOT_AUDIT_TEMP — Pasta de Auditoria
+
+          Esta pasta é gerada automaticamente pelo workflow
+          `.github/workflows/godot-audit-collect.yml` e destina-se
+          exclusivamente à análise do projecto Godot.
+
+          ## Conteúdo
+
+          | Pasta / Ficheiro      | Origem                                        |
+          |-----------------------|-----------------------------------------------|
+          | `scenes/`             | Cenas originais do projecto (`.tscn`)         |
+          | `scripts/`            | Scripts originais do projecto (`.gd`)         |
+          | `assets/`             | Texturas e recursos filtrados                 |
+          | `build_web/`          | Ficheiros gerados pela exportação Web         |
+          | `logs/`               | Logs do processo de importação e exportação   |
+          | `project.godot`       | Configuração principal do projecto            |
+          | `export_presets.cfg`  | Configuração de exportação                    |
+
+          ## Regras
+
+          - Esta pasta **não afecta** o funcionamento do jogo.
+          - Pode ser **apagada manualmente** sem qualquer consequência.
+          - Nenhum ficheiro original foi modificado.
+          - Nenhuma credencial ou token está incluído.
+
+          ## Gerado em
+
+          Workflow executado manualmente via GitHub Actions.
+          MDEOF
+
+          echo ""
+          echo "── Conteúdo de GODOT_AUDIT_TEMP ─────────────────────"
+          find GODOT_AUDIT_TEMP -type f | sort
+          echo "──────────────────────────────────────────────────────"
+
+      # ── 8. COMMIT E PUSH ───────────────────────────────────────────
+      - name: Publicar GODOT_AUDIT_TEMP no repositório
+        run: |
+          set -euo pipefail
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add GODOT_AUDIT_TEMP/
+
+          # Verificar se há alterações reais antes de fazer commit
+          if git diff --cached --quiet; then
+            echo "Sem alterações em GODOT_AUDIT_TEMP — nenhum commit necessário."
+          else
+            git commit -m "audit: actualizar GODOT_AUDIT_TEMP [$(date -u '+%Y-%m-%dT%H:%M:%SZ')]"
+            git push
+            echo "GODOT_AUDIT_TEMP publicado com sucesso."
+          fi
+
+      # ── 9. SUMÁRIO ─────────────────────────────────────────────────
+      - name: Sumário da recolha
+        if: always()
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  AXEV CRIME — Godot Audit Collect"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          if [[ -d GODOT_AUDIT_TEMP ]]; then
+            echo "Ficheiros em GODOT_AUDIT_TEMP:"
+            find GODOT_AUDIT_TEMP -type f | sort
+            echo ""
+            echo "Total de ficheiros: $(find GODOT_AUDIT_TEMP -type f | wc -l)"
+          else
+            echo "GODOT_AUDIT_TEMP não foi criada."
+          fi
+          echo ""
+          echo "Pasta pode ser apagada manualmente sem afectar o jogo."
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

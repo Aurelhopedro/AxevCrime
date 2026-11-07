@@ -1,6 +1,7 @@
-[gd_scene load_steps=4 format=3 uid="uid://player_scene"]
+[gd_scene load_steps=5 format=3 uid="uid://player_scene"]
 
 [ext_resource type="Script" path="res://scripts/player_controller.gd" id="1_player"]
+[ext_resource type="PackedScene" path="res://scenes/touch_ui.tscn" id="2_touch_ui"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_1"]
 radius = 0.4
@@ -26,3 +27,6 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
 
 [node name="Camera3D" type="Camera3D" parent="CameraPivot"]
 transform = Transform3D(1, 0, 0, 0, 0.966, 0.259, 0, -0.259, 0.966, 0, 0, 3)
+
+[node name="TouchUI" type="Node" parent="."]
+instance = ExtResource("2_touch_ui")

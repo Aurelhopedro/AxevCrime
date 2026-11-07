@@ -1,106 +1,448 @@
-name: Download Quaternius Character
+name: Setup Quaternius Character Assets
 
-## Descarrega o personagem CC0 do pack Quaternius Ultimate Modular Characters
-## e faz commit do GLB em assets/models/character/
+## ============================================================================
+## AXEV CRIME — Setup Quaternius Character Assets
+## ============================================================================
 ##
-## Executar MANUALMENTE uma vez para popular o repositório com o modelo.
-## Depois disso o Android build workflow usará o GLB já commitado.
+## Este workflow descarrega os dois GLBs Quaternius (CC0) necessários para
+## o personagem 3D funcional e faz commit em assets/models/character/.
 ##
-## Como usar:
-##   GitHub → Actions → "Download Quaternius Character" → Run workflow
+## FONTES VERIFICADAS:
+##
+##   animations.glb  ← Universal Animation Library 1 (Standard, CC0)
+##     Fonte:  OpenGameArt.org — subido pelo próprio Quaternius
+##     URL:    https://opengameart.org/content/universal-animation-library
+##     Ficheiro: universal_animation_librarystandard.zip (~14 MB)
+##     Dentro do ZIP: Godot/AnimationLibrary_Godot_Standard.glb
+##     Licença: CC0 Creative Commons Zero v1.0 Universal
+##     Download directo: SIM (sem autenticação necessária)
+##
+##   character.glb   ← Universal Base Characters (Standard, CC0)
+##     Fonte:  GitHub Releases do próprio repositório (AxevCrime)
+##     Motivo: O itch.io usa URLs assinados temporários (60s) que requerem
+##             sessão autenticada — wget directo é impossível sem credenciais.
+##             O único método legítimo de CI é o operador fazer upload manual
+##             para GitHub Releases e o workflow descarregar daqui.
+##     Licença: CC0 Creative Commons Zero v1.0 Universal
+##     Fonte original: https://quaternius.itch.io/universal-base-characters
+##     Download directo itch.io: NÃO (requer auth) → usar Release
+##
+## COMO USAR:
+##   1. Para as ANIMAÇÕES:
+##      Apenas corre este workflow — download automático.
+##
+##   2. Para o PERSONAGEM (uma vez só):
+##      a. Descarrega manualmente de: https://quaternius.itch.io/universal-base-characters
+##         → "Universal Base Characters[Standard].zip" (gratuito, CC0)
+##      b. Extrai o GLB Godot: UniversalBaseCharacters[Standard]/Godot/Male_Regular.glb
+##      c. No GitHub: Releases → "Create a new release"
+##         → Tag: "assets-v1"
+##         → Title: "Quaternius Assets CC0"
+##         → Upload: Male_Regular.glb (renomear para character.glb antes do upload)
+##      d. Corre este workflow
+##
+## RESULTADO:
+##   assets/models/character/character.glb   — personagem (~122 MB total no ZIP, ~4-8 MB o GLB)
+##   assets/models/character/animations.glb  — animações (~14 MB ZIP → GLB extraído)
+##   assets/models/character/LICENSE_CC0.txt — licença CC0 registada
+##   assets/models/character/ORIGINS.md      — registo de origem dos assets
+## ============================================================================
 
 on:
   workflow_dispatch:
     inputs:
       confirm:
-        description: 'Escreve "sim" para confirmar o download e commit do GLB CC0'
+        description: 'Escreve "sim" para confirmar o setup dos assets Quaternius CC0'
         required: true
         default: ''
 
+permissions:
+  contents: write
+
 jobs:
-  download-character:
-    runs-on: ubuntu-latest
+  setup-assets:
+    name: Download & Commit Quaternius CC0 Assets
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
     if: github.event.inputs.confirm == 'sim'
 
     steps:
+      # ── 1. CHECKOUT ────────────────────────────────────────────────
       - name: Checkout repositório
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
+      # ── 2. CRIAR PASTA DE DESTINO ──────────────────────────────────
       - name: Criar pasta de destino
-        run: mkdir -p assets/models/character
-
-      ## ----------------------------------------------------------------
-      ## O pack Quaternius Ultimate Modular Characters está disponível em:
-      ## https://quaternius.com/packs/ultimatemodularcharacters.html
-      ##
-      ## O ficheiro DamagedHelmet.glb abaixo é um placeholder de teste
-      ## (KhronosGroup, CC0). Substituir o URL pelo GLB Quaternius real
-      ## após descarregar o pack e alojar o GLB num URL público (ex: Releases).
-      ##
-      ## SUBSTITUIR ESTE URL pelo teu GLB Quaternius:
-      ## ----------------------------------------------------------------
-      - name: Verificar se GLB Quaternius já existe em Releases
-        id: check_release
         run: |
-          # Tentar descarregar o GLB de uma release do próprio repositório
-          HTTP_CODE=$(curl -s -o assets/models/character/character.glb \
-            -w "%{http_code}" \
-            "https://github.com/${{ github.repository }}/releases/download/assets/character.glb")
-          echo "http_code=$HTTP_CODE" >> $GITHUB_OUTPUT
+          mkdir -p assets/models/character
+          echo "Pasta assets/models/character/ pronta."
 
-      - name: Aviso se GLB não encontrado em Releases
-        if: steps.check_release.outputs.http_code != '200'
+      # ── 3. ANIMAÇÕES — OpenGameArt (download directo, sem auth) ────
+      - name: Descarregar Universal Animation Library 1 (Standard, CC0)
         run: |
-          rm -f assets/models/character/character.glb
-          echo "⚠️  GLB não encontrado em Releases."
+          set -euo pipefail
+
+          ANIM_URL="https://opengameart.org/sites/default/files/universal_animation_librarystandard.zip"
+          ANIM_ZIP="/tmp/anim_standard.zip"
+          ANIM_EXTRACT="/tmp/anim_extracted"
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Fonte: OpenGameArt.org (Quaternius, CC0)"
+          echo "  URL:   $ANIM_URL"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          HTTP_CODE=$(curl -L -o "$ANIM_ZIP" -w "%{http_code}" \
+            --retry 3 --retry-delay 5 \
+            -H "User-Agent: Mozilla/5.0 (GitHub Actions; AxevCrime setup)" \
+            "$ANIM_URL")
+
+          if [[ "$HTTP_CODE" -ne 200 ]]; then
+            echo "::error::Download das animações falhou (HTTP $HTTP_CODE)"
+            echo ""
+            echo "ALTERNATIVA: Descarrega manualmente de:"
+            echo "  https://opengameart.org/content/universal-animation-library"
+            echo "  Ficheiro: universal_animation_librarystandard.zip"
+            echo "  Extrai Godot/AnimationLibrary_Godot_Standard.glb"
+            echo "  Renomeia para animations.glb e coloca em assets/models/character/"
+            exit 1
+          fi
+
+          ANIM_SIZE=$(wc -c < "$ANIM_ZIP")
+          echo "ZIP descarregado: $(du -sh "$ANIM_ZIP" | cut -f1) ($ANIM_SIZE bytes)"
+
+          # Verificar que é um ZIP válido
+          HEX=$(xxd -l 2 -p "$ANIM_ZIP")
+          if [[ "$HEX" != "504b" ]]; then
+            echo "::error::Ficheiro descarregado não é um ZIP válido (magic: $HEX)"
+            exit 1
+          fi
+
+          # Extrair
+          mkdir -p "$ANIM_EXTRACT"
+          unzip -q "$ANIM_ZIP" -d "$ANIM_EXTRACT"
+
+          echo "Conteúdo do ZIP:"
+          find "$ANIM_EXTRACT" -name "*.glb" -o -name "*.GLB" | head -20
+
+      - name: Localizar e copiar GLB de animações (Godot Standard)
+        run: |
+          set -euo pipefail
+
+          ANIM_EXTRACT="/tmp/anim_extracted"
+
+          # Procurar o GLB Godot Standard (preferido)
+          # Ordem de preferência: Godot/ → raiz → qualquer GLB
+          GLB_PATH=""
+
+          # 1ª tentativa: pasta Godot/ com nome standard
+          GLB_PATH=$(find "$ANIM_EXTRACT" -path "*/Godot/*Standard*.glb" | head -1 || true)
+
+          # 2ª tentativa: pasta Godot/ qualquer GLB
+          if [[ -z "$GLB_PATH" ]]; then
+            GLB_PATH=$(find "$ANIM_EXTRACT" -path "*/Godot/*.glb" -not -name "*RootMotion*" | head -1 || true)
+          fi
+
+          # 3ª tentativa: qualquer GLB non-RootMotion
+          if [[ -z "$GLB_PATH" ]]; then
+            GLB_PATH=$(find "$ANIM_EXTRACT" -name "*.glb" -not -name "*RootMotion*" -not -name "*rootmotion*" | head -1 || true)
+          fi
+
+          # 4ª tentativa: qualquer GLB
+          if [[ -z "$GLB_PATH" ]]; then
+            GLB_PATH=$(find "$ANIM_EXTRACT" -name "*.glb" | head -1 || true)
+          fi
+
+          if [[ -z "$GLB_PATH" ]]; then
+            echo "::error::Nenhum ficheiro .glb encontrado no ZIP das animações"
+            echo "Conteúdo do ZIP:"
+            find "$ANIM_EXTRACT" | head -40
+            exit 1
+          fi
+
+          echo "GLB de animações encontrado: $GLB_PATH"
+          echo "Tamanho: $(du -sh "$GLB_PATH" | cut -f1)"
+
+          cp "$GLB_PATH" assets/models/character/animations.glb
+
+          # SHA-256 para registo de origem
+          SHA256=$(sha256sum assets/models/character/animations.glb | cut -d' ' -f1)
+          echo "SHA-256 animations.glb: $SHA256"
+          echo "ANIM_SHA256=$SHA256" >> "$GITHUB_ENV"
+          echo "ANIM_SOURCE_FILE=$(basename "$GLB_PATH")" >> "$GITHUB_ENV"
+
+          echo "✓ animations.glb copiado para assets/models/character/"
+
+      # ── 4. PERSONAGEM — GitHub Release (único método válido sem auth) ──
+      - name: Descarregar character.glb de GitHub Release
+        id: download_character
+        run: |
+          set -euo pipefail
+
+          CHAR_DEST="assets/models/character/character.glb"
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Personagem: Universal Base Characters (Standard, CC0)"
+          echo "  Fonte esperada: GitHub Release deste repositório"
+          echo "  Tag: assets-v1"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          # Tentar descarregar de Release
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/download/assets-v1/character.glb"
+
+          HTTP_CODE=$(curl -L -o "$CHAR_DEST" -w "%{http_code}" \
+            --retry 3 --retry-delay 5 \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "User-Agent: GitHub-Actions-AxevCrime" \
+            "$RELEASE_URL" || echo "000")
+
+          if [[ "$HTTP_CODE" -eq 200 ]]; then
+            CHAR_SIZE=$(wc -c < "$CHAR_DEST")
+            if [[ "$CHAR_SIZE" -lt 10000 ]]; then
+              echo "::error::character.glb descarregado tem apenas $CHAR_SIZE bytes — parece inválido"
+              rm -f "$CHAR_DEST"
+              echo "character_ok=false" >> "$GITHUB_OUTPUT"
+            else
+              HEX=$(xxd -l 4 -p "$CHAR_DEST")
+              if [[ "$HEX" == "676c5446" ]]; then
+                echo "✓ character.glb descarregado com sucesso (GLB válido)"
+                echo "  Tamanho: $(du -sh "$CHAR_DEST" | cut -f1)"
+                SHA256=$(sha256sum "$CHAR_DEST" | cut -d' ' -f1)
+                echo "  SHA-256: $SHA256"
+                echo "CHAR_SHA256=$SHA256" >> "$GITHUB_ENV"
+                echo "character_ok=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "::warning::Ficheiro descarregado não tem magic GLB (676c5446), tem: $HEX"
+                echo "character_ok=false" >> "$GITHUB_OUTPUT"
+                rm -f "$CHAR_DEST"
+              fi
+            fi
+          else
+            echo "character.glb não encontrado em Release (HTTP $HTTP_CODE)"
+            echo "character_ok=false" >> "$GITHUB_OUTPUT"
+            rm -f "$CHAR_DEST"
+          fi
+
+      - name: INSTRUÇÕES se character.glb não foi encontrado
+        if: steps.download_character.outputs.character_ok != 'true'
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  CHARACTER.GLB NÃO ENCONTRADO — ACÇÃO MANUAL NECESSÁRIA"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo ""
-          echo "PASSOS PARA ADICIONAR O MODELO QUATERNIUS:"
-          echo "1. Descarrega o pack em: https://quaternius.com/packs/ultimatemodularcharacters.html"
-          echo "2. Extrai o ficheiro GLB com animações (ex: AnimatedCharacter.glb)"
-          echo "3. No GitHub: Releases → Edit → Upload Assets → faz upload como 'character.glb'"
-          echo "4. Volta a correr este workflow"
+          echo "O itch.io usa URLs assinados temporários (60s) que requerem"
+          echo "sessão autenticada. Download automático sem credenciais é"
+          echo "tecnicamente impossível sem violar os ToS do itch.io."
           echo ""
-          echo "O jogo funciona sem o GLB (personagem invisível mas controlável)."
+          echo "PASSOS PARA RESOLVER (uma vez só):"
+          echo ""
+          echo "  1. Acede a: https://quaternius.itch.io/universal-base-characters"
+          echo "     → Clica em 'Download Now' (gratuito, CC0)"
+          echo "     → Descarrega: 'Universal Base Characters[Standard].zip' (~122 MB)"
+          echo ""
+          echo "  2. Extrai o ZIP e localiza o GLB Godot:"
+          echo "     UniversalBaseCharacters[Standard]/"
+          echo "       └── Godot/"
+          echo "           └── Male_Regular.glb   ← este ficheiro"
+          echo ""
+          echo "  3. No GitHub deste repositório:"
+          echo "     → Releases → 'Create a new release'"
+          echo "     → Tag: assets-v1"
+          echo "     → Title: 'Quaternius Assets CC0'"
+          echo "     → Anexa Male_Regular.glb com o nome: character.glb"
+          echo "     → Publica o Release"
+          echo ""
+          echo "  4. Volta a correr este workflow com confirm=sim"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "NOTA: As ANIMAÇÕES foram descarregadas com sucesso."
+          echo "      O jogo funciona sem o personagem (invisível, lógica intacta)."
+          echo "      A integração visual 3D completa requer character.glb."
+          echo ""
+          echo "character_missing=true" >> "$GITHUB_ENV"
 
-      - name: Criar README na pasta do modelo
+      # ── 5. LICENÇA E REGISTO DE ORIGEM ─────────────────────────────
+      - name: Criar ficheiro de licença CC0
         run: |
-          cat > assets/models/character/README.md << 'EOF'
-          # Modelo do Personagem — AXEV CRIME
+          cat > assets/models/character/LICENSE_CC0.txt << 'LICENSEEOF'
+          LICENÇA DOS ASSETS 3D — AXEV CRIME
+          ====================================
 
-          ## Fonte
-          **Quaternius Ultimate Modular Characters** — https://quaternius.com/packs/ultimatemodularcharacters.html
-          Licença: **CC0 (domínio público)**
+          Os ficheiros nesta pasta (character.glb e animations.glb) são
+          propriedade do autor Quaternius e foram disponibilizados sob a
+          licença Creative Commons Zero v1.0 Universal (CC0).
 
-          ## Como integrar o GLB em Godot 4.3
-          1. Coloca `character.glb` nesta pasta.
-          2. Abre o projecto em Godot 4.3.
-          3. No FileSystem, faz duplo clique em `character.glb` → confirma importação.
-          4. Abre `scenes/player.tscn`.
-          5. No SceneTree, clica em `CharacterMesh`.
-          6. Arrasta `character.glb` do FileSystem para dentro de `CharacterMesh` como filho.
-          7. O `player_controller.gd` detecta automaticamente o `AnimationPlayer`.
+          CC0 — Domínio Público
+          https://creativecommons.org/publicdomain/zero/1.0/
 
-          ## Escala esperada
-          O personagem deve ficar com ~1.8m de altura.
-          Se parecer gigante ou anão, selecciona o nó raiz do GLB e ajusta:
-          - Transform → Scale → (0.01, 0.01, 0.01) se vier em centímetros
-          - Transform → Scale → (1, 1, 1) se já estiver em metros
+          Em resumo: uso livre em projectos pessoais, educacionais e comerciais.
+          Sem necessidade de atribuição. Sem restrições.
 
-          ## Animações esperadas
-          O `player_controller.gd` procura estas animações (nomes Quaternius):
-          - `Idle`
-          - `Walk`
-          - `Run`
-          - `Jump`
+          AUTOR ORIGINAL: Quaternius
+          Website: https://quaternius.com
+          Itch.io:  https://quaternius.itch.io
 
-          Se o teu GLB usar prefixo (ex: `Armature|Walk`), o script tenta
-          automaticamente o prefixo `Armature|`.
-          EOF
+          ASSETS INCLUÍDOS:
+            character.glb   — Universal Base Characters (Standard)
+                              https://quaternius.itch.io/universal-base-characters
 
-      - name: Commit do README (e do GLB se descarregado)
+            animations.glb  — Universal Animation Library 1 (Standard)
+                              https://opengameart.org/content/universal-animation-library
+                              https://quaternius.itch.io/universal-animation-library
+          LICENSEEOF
+
+      - name: Criar registo de origem (ORIGINS.md)
+        run: |
+          TIMESTAMP=$(date -u "+%Y-%m-%dT%H:%M:%SZ")
+          CHAR_STATUS="PRESENTE (descarregado via GitHub Release assets-v1)"
+          if [[ "${character_missing:-false}" == "true" ]]; then
+            CHAR_STATUS="AUSENTE — ver instruções no log do workflow"
+          fi
+
+          cat > assets/models/character/ORIGINS.md << ORIGINSEOF
+          # Registo de Origem dos Assets — AXEV CRIME
+
+          Gerado automaticamente pelo workflow \`.github/workflows/setup-character-model.yml\`
+          Data: ${TIMESTAMP}
+          Commit: ${{ github.sha }}
+
+          ---
+
+          ## animations.glb — Universal Animation Library 1 (Standard)
+
+          | Campo | Valor |
+          |---|---|
+          | Autor | Quaternius |
+          | Licença | CC0 Creative Commons Zero v1.0 |
+          | Fonte primária | https://quaternius.itch.io/universal-animation-library |
+          | Espelho usado | https://opengameart.org/content/universal-animation-library |
+          | Ficheiro no ZIP | ${ANIM_SOURCE_FILE:-AnimationLibrary_Godot_Standard.glb} |
+          | SHA-256 | ${ANIM_SHA256:-não calculado} |
+          | Download automático | ✅ Sim (OpenGameArt, sem autenticação) |
+          | Atribuição obrigatória | Não (CC0) |
+
+          ### Animações incluídas na versão Standard (45 clips)
+          Locomotion 8 direcções, Idle, Walk, Jog, Sprint, Jump, Fall, Land,
+          Crawl, Swim, Sit, Push, Death, e emotes. Ver preview:
+          https://quaternius.com/animviewer.html
+
+          ---
+
+          ## character.glb — Universal Base Characters (Standard, Male Regular)
+
+          | Campo | Valor |
+          |---|---|
+          | Autor | Quaternius |
+          | Licença | CC0 Creative Commons Zero v1.0 |
+          | Fonte | https://quaternius.itch.io/universal-base-characters |
+          | Ficheiro no ZIP | Godot/Male_Regular.glb |
+          | SHA-256 | ${CHAR_SHA256:-não calculado — ficheiro ausente} |
+          | Download automático | ❌ Não (itch.io requer sessão autenticada) |
+          | Método de CI | GitHub Release deste repositório (tag: assets-v1) |
+          | Status | ${CHAR_STATUS} |
+          | Atribuição obrigatória | Não (CC0) |
+
+          ---
+
+          ## Notas de Conformidade
+
+          - Todos os assets são CC0 (domínio público).
+          - Nenhuma modificação foi feita ao conteúdo dos GLBs.
+          - Os ficheiros são usados tal como fornecidos pelo autor.
+          - O uso comercial e redistribuição são permitidos sem atribuição.
+          ORIGINSEOF
+
+          echo "✓ Ficheiros de licença e origem criados."
+
+      # ── 6. VERIFICAÇÃO FINAL DOS FICHEIROS ─────────────────────────
+      - name: Verificar ficheiros presentes
+        run: |
+          echo "=== Conteúdo de assets/models/character/ ==="
+          ls -lh assets/models/character/
+
+          echo ""
+          echo "=== Verificação de integridade ==="
+
+          if [[ -f "assets/models/character/animations.glb" ]]; then
+            HEX=$(xxd -l 4 -p assets/models/character/animations.glb)
+            if [[ "$HEX" == "676c5446" ]]; then
+              echo "✓ animations.glb — GLB válido ($(du -sh assets/models/character/animations.glb | cut -f1))"
+            else
+              echo "✗ animations.glb — magic inválido: $HEX"
+            fi
+          else
+            echo "✗ animations.glb — AUSENTE"
+          fi
+
+          if [[ -f "assets/models/character/character.glb" ]]; then
+            HEX=$(xxd -l 4 -p assets/models/character/character.glb)
+            if [[ "$HEX" == "676c5446" ]]; then
+              echo "✓ character.glb  — GLB válido ($(du -sh assets/models/character/character.glb | cut -f1))"
+            else
+              echo "✗ character.glb  — magic inválido: $HEX"
+            fi
+          else
+            echo "⚠ character.glb  — AUSENTE (ver instruções acima para resolver)"
+          fi
+
+      # ── 7. COMMIT ──────────────────────────────────────────────────
+      - name: Commit dos assets e ficheiros de origem
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git add assets/models/character/
-          git diff --cached --quiet || git commit -m "feat: adicionar pasta do modelo Quaternius + README de integração"
-          git push
+
+          if git diff --cached --quiet; then
+            echo "Nenhuma alteração para commitar (ficheiros já actualizados)."
+          else
+            # Construir mensagem de commit informativa
+            CHAR_MSG="ausente (ver ORIGINS.md)"
+            if [[ -f "assets/models/character/character.glb" ]]; then
+              CHAR_MSG="presente ($(du -sh assets/models/character/character.glb | cut -f1))"
+            fi
+
+            ANIM_MSG="ausente"
+            if [[ -f "assets/models/character/animations.glb" ]]; then
+              ANIM_MSG="presente ($(du -sh assets/models/character/animations.glb | cut -f1))"
+            fi
+
+            git commit -m "feat: assets Quaternius CC0 — animations.glb ${ANIM_MSG}, character.glb ${CHAR_MSG}
+
+          Fonte animations.glb: OpenGameArt.org (Quaternius, Universal Animation Library 1 Standard)
+          Fonte character.glb:  GitHub Release assets-v1 (Quaternius, Universal Base Characters Standard)
+          Licença: CC0 Creative Commons Zero v1.0 Universal
+          Workflow: setup-character-model.yml
+          SHA: ${{ github.sha }}"
+
+            git push
+            echo "✓ Commit realizado com sucesso."
+          fi
+
+      # ── 8. SUMÁRIO ─────────────────────────────────────────────────
+      - name: Sumário do setup
+        if: always()
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  AXEV CRIME — Quaternius Assets Setup"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          if [[ -f "assets/models/character/animations.glb" ]]; then
+            echo "  animations.glb : ✅ PRESENTE ($(du -sh assets/models/character/animations.glb | cut -f1))"
+          else
+            echo "  animations.glb : ❌ AUSENTE"
+          fi
+
+          if [[ -f "assets/models/character/character.glb" ]]; then
+            echo "  character.glb  : ✅ PRESENTE ($(du -sh assets/models/character/character.glb | cut -f1))"
+          else
+            echo "  character.glb  : ⚠️  AUSENTE — acção manual necessária"
+            echo "    → Ver 'INSTRUÇÕES se character.glb não foi encontrado' acima"
+          fi
+
+          echo ""
+          echo "  Licença: CC0 (domínio público, uso livre)"
+          echo "  Registo: assets/models/character/ORIGINS.md"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

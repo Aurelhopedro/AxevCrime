@@ -9,39 +9,46 @@ radius = 0.4
 height = 1.8
 
 ;; ==========================================================================
-;; AXEV CRIME — Player Scene  (Fase 3 — The_Soldier.glb integrado)
+;; AXEV CRIME — Player Scene  (Fase 3.1 — The_Soldier.glb + animações)
 ;; ==========================================================================
 ;;
-;; HIERARQUIA ACTUAL:
+;; HIERARQUIA:
 ;;
 ;; Player (CharacterBody3D)
-;; ├── CollisionShape3D        — cápsula radius=0.4 height=1.8, NÃO mexer
-;; ├── CharacterMesh (Node3D)  — pivot de rotação; contém o GLB do personagem
+;; ├── CollisionShape3D        — radius=0.4, height=1.8 — NÃO MEXER
+;; ├── CharacterMesh (Node3D)  — pivot de rotação; recebe rotação do controlador
 ;; │   └── The_Soldier         — The_Soldier.glb instanciado
-;; │       └── [Skeleton3D + AnimationPlayer se incorporados no GLB]
-;; ├── AnimationRoot (Node3D)  — reservado para biblioteca de animações externa
-;; │   └── [animations.glb quando disponível]
+;; │       └── Armature (Node3D)
+;; │           ├── Skeleton3D
+;; │           │   └── [MeshInstances com 19 materiais]
+;; │           └── AnimationPlayer — 117 animações, detectado por _find_ap_deep()
+;; ├── AnimationRoot (Node3D)  — reservado; não usado com GLB com anims incorporadas
 ;; ├── CameraPivot (Node3D)
 ;; │   └── Camera3D
 ;; └── TouchUI (instância)
 ;;
-;; NOTAS DE POSICIONAMENTO:
-;;   - CapsuleShape3D origin.y = 0.9  (centro da cápsula a meio da altura)
-;;   - The_Soldier origin.y = -0.9    (alinha base do modelo com y=0 do Player)
-;;   - Se o modelo flutuar: reduzir origin.y (ex: -0.95)
-;;   - Se o modelo ficar enterrado: aumentar origin.y (ex: -0.85)
-;;   - Se o modelo for gigante (pack em cm): escala (0.01, 0.01, 0.01)
+;; ESCALA DO MODELO:
+;;   A escala correcta depende das unidades de exportação do GLB.
 ;;
-;; ANIMAÇÕES:
-;;   O player_controller.gd detecta AnimationPlayer automaticamente:
-;;   1º em AnimationRoot, 2º em CharacterMesh (GLB com anims incorporadas).
-;;   Se The_Soldier.glb tiver AnimationPlayer interno, é usado directamente.
-;;   Nomes esperados: Idle, Walk, Jog, Sprint, Jump, Fall, Land
-;;   (ou com prefixo "Armature|" — tratado automaticamente pelo script)
+;;   CASO A — Modelo em METROS (~1.8m de altura):
+;;     The_Soldier scale = (1, 1, 1)   ← valor actual
+;;     The_Soldier origin.y = -0.9     ← base do modelo no chão
 ;;
-;; PRESERVADO (NÃO ALTERADO):
-;;   player_controller.gd, touch_ui.tscn, main.tscn, main.gd
-;;   Sistema de movimento, joystick, câmara, colisão, botões
+;;   CASO B — Modelo em CENTÍMETROS (~180 unidades de altura, Mixamo):
+;;     The_Soldier scale = (0.01, 0.01, 0.01)
+;;     The_Soldier origin.y = -0.9
+;;     [Ajustar manualmente no editor após confirmar com audit-soldier-glb]
+;;
+;;   Para confirmar: GitHub Actions → "Audit Soldier GLB" → ver "Altura estimada"
+;;   ou abrir no editor Godot e verificar se o modelo cobre a cápsula azul.
+;;
+;; ANIMAÇÕES (player_controller.gd v3):
+;;   O controlador detecta o AnimationPlayer automaticamente e resolve
+;;   os nomes reais das animações em runtime via ANIM_CANDIDATES.
+;;   Ver Output do Godot após iniciar o jogo para a lista completa.
+;;
+;; PRESERVADO:
+;;   CollisionShape3D, CameraPivot, Camera3D, TouchUI, scripts
 ;; ==========================================================================
 
 [node name="Player" type="CharacterBody3D"]
@@ -54,10 +61,10 @@ shape = SubResource("CapsuleShape3D_1")
 [node name="CharacterMesh" type="Node3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
 
-;; The_Soldier.glb instanciado como filho de CharacterMesh.
-;; origin.y = -0.9: compensa o centro da cápsula (height/2 = 0.9)
-;; para que a base do modelo fique em y=0 (nível do chão).
-;; Escala (1,1,1): assume modelo em metros. Se gigante, usar (0.01, 0.01, 0.01).
+;; The_Soldier.glb instanciado.
+;; origin.y = -0.9: alinha a base do modelo com o chão (y=0 do Player).
+;; scale = (1,1,1): assume modelo em metros.
+;; Se o personagem aparecer gigante no editor, mudar para (0.01, 0.01, 0.01).
 [node name="The_Soldier" parent="CharacterMesh" instance=ExtResource("3_soldier")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.9, 0)
 

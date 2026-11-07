@@ -19,7 +19,7 @@ concurrency:
 env:
   GODOT_VERSION: "4.3-stable"
   GODOT_BIN: /usr/local/bin/godot
-  EXPORT_TEMPLATES_DIR: $HOME/.local/share/godot/export_templates/4.3.stable
+  EXPORT_TEMPLATES_DIR: /root/.local/share/godot/export_templates/4.3.stable
 
 jobs:
   validate:
@@ -64,13 +64,46 @@ jobs:
             "https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz" \
             -O /tmp/templates.tpz
 
-          mkdir -p "$EXPORT_TEMPLATES_DIR"
+          mkdir -p /tmp/templates_extracted
           unzip -q /tmp/templates.tpz -d /tmp/templates_extracted
 
-          mv /tmp/templates_extracted/templates/* "$EXPORT_TEMPLATES_DIR/"
+          echo "--- Contents of extracted archive ---"
+          find /tmp/templates_extracted -type f | sort
 
-          echo "Export templates installed:"
-          ls "$EXPORT_TEMPLATES_DIR/" | grep -E "web" || echo "(no web template listed — verify template archive)"
+          TEMPLATE_SRC=$(find /tmp/templates_extracted -type d -name "templates" | head -1)
+
+          if [[ -z "$TEMPLATE_SRC" ]]; then
+            echo "::error::Could not locate templates directory inside archive"
+            exit 1
+          fi
+
+          echo "Template source directory: $TEMPLATE_SRC"
+          mkdir -p "$EXPORT_TEMPLATES_DIR"
+          cp -r "$TEMPLATE_SRC"/. "$EXPORT_TEMPLATES_DIR/"
+
+          echo "--- Installed template files ---"
+          ls -lh "$EXPORT_TEMPLATES_DIR/"
+
+      - name: Verify Web export templates
+        run: |
+          set -euo pipefail
+
+          required_templates=(
+            "web_nothreads_debug.zip"
+            "web_nothreads_release.zip"
+          )
+
+          for tpl in "${required_templates[@]}"; do
+            if [[ ! -f "$EXPORT_TEMPLATES_DIR/$tpl" ]]; then
+              echo "::error::Required Web export template missing: $EXPORT_TEMPLATES_DIR/$tpl"
+              echo "Available files in template directory:"
+              ls "$EXPORT_TEMPLATES_DIR/" || echo "(directory empty or missing)"
+              exit 1
+            fi
+            echo "OK: $tpl"
+          done
+
+          echo "Web export templates verified."
 
       - name: Verify required files
         run: |
@@ -193,17 +226,7 @@ jobs:
             exit 1
           fi
 
-          required_web_files=(
-            "build/web/index.html"
-          )
-
-          for file in "${required_web_files[@]}"; do
-            if [[ ! -f "$file" ]]; then
-              echo "::error::Expected export file missing: $file"
-              exit 1
-            fi
-            echo "OK: $file ($(wc -c < "$file") bytes)"
-          done
+          echo "OK: build/web/index.html ($(wc -c < build/web/index.html) bytes)"
 
           echo "--- Web export directory contents ---"
           ls -lh build/web/

@@ -18,7 +18,40 @@ jobs:
       - name: Checkout repositório
         uses: actions/checkout@v4
 
-      # ── 2. JAVA 17 ─────────────────────────────────────────────────
+      # ── 2. VERIFICAR GLBs DO PERSONAGEM ────────────────────────────
+      # Build falha imediatamente se os GLBs Quaternius não estiverem
+      # presentes. Isto evita builds sem o personagem.
+      - name: Verificar assets Quaternius obrigatórios
+        run: |
+          set -euo pipefail
+          MISSING=0
+
+          if [[ ! -f "assets/models/character/character.glb" ]]; then
+            echo "::error::character.glb não encontrado em assets/models/character/"
+            echo "  → Descarrega de: https://quaternius.com/packs/universalbasecharacters.html"
+            echo "  → Extrai Male_Regular.glb e renomeia para character.glb"
+            MISSING=1
+          else
+            echo "✓ character.glb ($(du -sh assets/models/character/character.glb | cut -f1))"
+          fi
+
+          if [[ ! -f "assets/models/character/animations.glb" ]]; then
+            echo "::error::animations.glb não encontrado em assets/models/character/"
+            echo "  → Descarrega de: https://quaternius.com/packs/universalanimationlibrary.html"
+            echo "  → Extrai AnimationLibrary_Godot_Standard.glb e renomeia para animations.glb"
+            MISSING=1
+          else
+            echo "✓ animations.glb ($(du -sh assets/models/character/animations.glb | cut -f1))"
+          fi
+
+          if [[ "$MISSING" -eq 1 ]]; then
+            echo ""
+            echo "INSTRUÇÕES COMPLETAS: assets/models/character/README.md"
+            exit 1
+          fi
+          echo "Todos os assets do personagem presentes."
+
+      # ── 3. JAVA 17 ─────────────────────────────────────────────────
       - name: Confirmar Java 17
         run: |
           java -version
@@ -27,7 +60,7 @@ jobs:
           echo "JAVA_HOME_DETECTED=$JAVA_HOME_DETECTED" >> "$GITHUB_ENV"
           echo "Java home: $JAVA_HOME_DETECTED"
 
-      # ── 3. DEPENDÊNCIAS DO SISTEMA ─────────────────────────────────
+      # ── 4. DEPENDÊNCIAS DO SISTEMA ─────────────────────────────────
       - name: Instalar dependências do sistema
         run: |
           set -euo pipefail
@@ -38,7 +71,7 @@ jobs:
             libxrender1 libxi6 libxrandr2 \
             libxcursor1 libxinerama1 libgl1
 
-      # ── 4. GODOT 4.3 ───────────────────────────────────────────────
+      # ── 5. GODOT 4.3 ───────────────────────────────────────────────
       - name: Instalar Godot 4.3
         run: |
           set -euo pipefail
@@ -51,7 +84,7 @@ jobs:
             /usr/local/bin/godot
           godot --version
 
-      # ── 5. TEMPLATES DE EXPORTAÇÃO GODOT 4.3 ───────────────────────
+      # ── 6. TEMPLATES DE EXPORTAÇÃO GODOT 4.3 ───────────────────────
       - name: Instalar templates de exportação Godot 4.3
         run: |
           set -euo pipefail
@@ -71,7 +104,7 @@ jobs:
           echo "Templates instalados: $(ls "$TEMPLATES_DIR" | wc -l) ficheiros"
           ls "$TEMPLATES_DIR/" | grep -i android || echo "AVISO: nenhum ficheiro android encontrado"
 
-      # ── 6. ANDROID SDK — localizar o pré-instalado no runner ───────
+      # ── 7. ANDROID SDK — localizar o pré-instalado no runner ───────
       - name: Localizar Android SDK
         run: |
           set -euo pipefail
@@ -85,7 +118,6 @@ jobs:
           echo "ANDROID_SDK_ROOT=$CANDIDATE" >> "$GITHUB_ENV"
           echo "Android SDK: $CANDIDATE"
 
-          # Localizar sdkmanager
           SDKMANAGER="$(find "$CANDIDATE" -name "sdkmanager" 2>/dev/null | head -1)"
           if [[ -z "$SDKMANAGER" ]]; then
             echo "::error::sdkmanager não encontrado"
@@ -96,50 +128,34 @@ jobs:
           echo "sdkmanager: $SDKMANAGER"
           "$SDKMANAGER" --version || true
 
-      # ── 7. BUILD TOOLS E PLATFORM ──────────────────────────────────
-      # Instalar apenas build-tools e platform — SEM NDK via sdkmanager
-      # para evitar o SIGPIPE causado por yes | sdkmanager | tail
+      # ── 8. BUILD TOOLS E PLATFORM ──────────────────────────────────
       - name: Instalar build-tools e platform Android
         run: |
           set -euo pipefail
-
-          # Aceitar licenças — sem pipe, redireccionando input directamente
           "$SDKMANAGER" --licenses < /dev/null 2>&1 | grep -v "^$" | tail -5 || true
-
-          # Instalar build-tools e platform sem NDK (NDK já existe no runner)
-          # Capturar exit code correctamente sem pipe para tail
           "$SDKMANAGER" "build-tools;34.0.0" "platforms;android-34" \
             < /dev/null > /tmp/sdkmanager_install.log 2>&1
           SDK_EXIT=$?
-
           tail -10 /tmp/sdkmanager_install.log
-
           if [[ "$SDK_EXIT" -ne 0 ]]; then
             echo "::error::sdkmanager falhou (exit $SDK_EXIT)"
             cat /tmp/sdkmanager_install.log
             exit 1
           fi
-
           echo "Build Tools e Platform instalados."
-          ls "$ANDROID_SDK_ROOT/build-tools/" 2>/dev/null || true
 
-      # ── 8. NDK — reutilizar o pré-instalado no runner ──────────────
-      # O runner ubuntu-22.04 já inclui NDK 25.x ou 26.x
-      # O Godot 4.3 é compatível com NDK >= 23
+      # ── 9. NDK — reutilizar o pré-instalado no runner ──────────────
       - name: Localizar NDK pré-instalado
         run: |
           set -euo pipefail
-
           NDK_BASE="$ANDROID_SDK_ROOT/ndk"
           echo "NDKs disponíveis no runner:"
           ls "$NDK_BASE/" 2>/dev/null || echo "(nenhum)"
 
-          # Preferir r23c se existir, senão usar o mais recente disponível
           if [[ -d "$NDK_BASE/23.2.8568313" ]]; then
             ANDROID_NDK_ROOT="$NDK_BASE/23.2.8568313"
             echo "NDK r23c encontrado."
           else
-            # Usar o NDK mais recente pré-instalado (Godot 4.3 aceita >= r23)
             ANDROID_NDK_ROOT="$(find "$NDK_BASE" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -1)"
             if [[ -z "$ANDROID_NDK_ROOT" ]]; then
               echo "::error::Nenhum NDK encontrado no runner"
@@ -151,14 +167,13 @@ jobs:
           echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT" >> "$GITHUB_ENV"
           echo "NDK a usar: $ANDROID_NDK_ROOT"
 
-          # Verificar que é um NDK válido
           if [[ ! -f "$ANDROID_NDK_ROOT/source.properties" ]]; then
             echo "::error::source.properties não encontrado — NDK inválido"
             exit 1
           fi
           cat "$ANDROID_NDK_ROOT/source.properties"
 
-      # ── 9. KEYSTORE DE DEBUG ────────────────────────────────────────
+      # ── 10. KEYSTORE DE DEBUG ───────────────────────────────────────
       - name: Gerar keystore de debug temporária
         run: |
           set -euo pipefail
@@ -180,8 +195,7 @@ jobs:
           fi
           echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
 
-      # ── 10. KEYSTORE VIA VARIÁVEIS DE AMBIENTE ─────────────────────
-      # Godot 4.3 lê nativamente GODOT_ANDROID_KEYSTORE_DEBUG_* em modo headless
+      # ── 11. KEYSTORE VIA VARIÁVEIS DE AMBIENTE ─────────────────────
       - name: Configurar variáveis de keystore Android
         run: |
           echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$KEYSTORE_PATH"  >> "$GITHUB_ENV"
@@ -189,12 +203,12 @@ jobs:
           echo "GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD=android"     >> "$GITHUB_ENV"
           echo "Variáveis de keystore configuradas."
 
-      # ── 11. IMPORTAR RECURSOS DO PROJECTO ──────────────────────────
+      # ── 12. IMPORTAR RECURSOS DO PROJECTO ──────────────────────────
       - name: Importar recursos do projecto
-        timeout-minutes: 5
+        timeout-minutes: 8
         run: |
           set -euo pipefail
-          timeout 180s godot \
+          timeout 420s godot \
             --headless \
             --editor \
             --path "$GITHUB_WORKSPACE" \
@@ -202,8 +216,8 @@ jobs:
             --quit 2>&1 | tee /tmp/godot_import.log
           status=${PIPESTATUS[0]}
 
-          echo "--- Import log (últimas 20 linhas) ---"
-          tail -20 /tmp/godot_import.log
+          echo "--- Import log (últimas 30 linhas) ---"
+          tail -30 /tmp/godot_import.log
 
           if grep -Eiq \
             '(^ERROR:|SCRIPT ERROR:|Parse Error:|Failed to load script|Failed loading resource)' \
@@ -212,7 +226,7 @@ jobs:
           fi
           echo "Import concluído (exit: $status)"
 
-      # ── 12. EXPORTAR ANDROID DEBUG APK ─────────────────────────────
+      # ── 13. EXPORTAR ANDROID DEBUG APK ─────────────────────────────
       - name: Exportar Android Debug APK
         timeout-minutes: 20
         env:
@@ -246,7 +260,7 @@ jobs:
           fi
           echo "Exportação Android concluída."
 
-      # ── 13. VERIFICAR APK ──────────────────────────────────────────
+      # ── 14. VERIFICAR APK ──────────────────────────────────────────
       - name: Verificar APK gerado
         run: |
           set -euo pipefail
@@ -276,7 +290,7 @@ jobs:
           echo "  Magic:   $HEX_MAGIC (ZIP válido)"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-      # ── 14. UPLOAD APK COMO ARTIFACT DESCARREGÁVEL ─────────────────
+      # ── 15. UPLOAD APK COMO ARTIFACT DESCARREGÁVEL ─────────────────
       - name: Upload APK como artifact
         uses: actions/upload-artifact@v4
         with:
@@ -285,7 +299,7 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
-      # ── 15. LOGS SEMPRE GUARDADOS ──────────────────────────────────
+      # ── 16. LOGS SEMPRE GUARDADOS ───────────────────────────────────
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -298,7 +312,7 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-      # ── 16. SUMÁRIO ────────────────────────────────────────────────
+      # ── 17. SUMÁRIO ────────────────────────────────────────────────
       - name: Sumário da exportação
         if: always()
         run: |

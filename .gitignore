@@ -16,3 +16,7 @@ build/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Pasta de auditoria temporária gerada por workflows CI
+# Contém um project.godot que confunde o Godot durante a importação
+GODOT_AUDIT_TEMP/

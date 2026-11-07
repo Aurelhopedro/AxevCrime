@@ -32,15 +32,14 @@ height = 1.8
 ;;
 ;;   CASO A — Modelo em METROS (~1.8m de altura):
 ;;     The_Soldier scale = (1, 1, 1)   ← valor actual
-;;     The_Soldier origin.y = -0.9     ← base do modelo no chão
+;;     The_Soldier origin.y = 0.0      ← origem já nos pés do modelo
 ;;
 ;;   CASO B — Modelo em CENTÍMETROS (~180 unidades de altura, Mixamo):
 ;;     The_Soldier scale = (0.01, 0.01, 0.01)
-;;     The_Soldier origin.y = -0.9
-;;     [Ajustar manualmente no editor após confirmar com audit-soldier-glb]
+;;     The_Soldier origin.y = 0.0
 ;;
-;;   Para confirmar: GitHub Actions → "Audit Soldier GLB" → ver "Altura estimada"
-;;   ou abrir no editor Godot e verificar se o modelo cobre a cápsula azul.
+;;   CollisionShape3D: transform.y=0.9 coloca o centro da cápsula a 0.9m
+;;   acima do Player — base da cápsula fica a y=0, coincidente com os pés.
 ;;
 ;; ANIMAÇÕES (player_controller.gd v3):
 ;;   O controlador detecta o AnimationPlayer automaticamente e resolve
@@ -62,11 +61,11 @@ shape = SubResource("CapsuleShape3D_1")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
 
 ;; The_Soldier.glb instanciado.
-;; origin.y = -0.9: alinha a base do modelo com o chão (y=0 do Player).
+;; origin.y = 0.0: origem do GLB já está nos pés do modelo.
 ;; scale = (1,1,1): assume modelo em metros.
 ;; Se o personagem aparecer gigante no editor, mudar para (0.01, 0.01, 0.01).
 [node name="The_Soldier" parent="CharacterMesh" instance=ExtResource("3_soldier")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.9, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
 
 [node name="AnimationRoot" type="Node3D" parent="."]
 visible = false

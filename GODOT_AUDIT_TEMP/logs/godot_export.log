@@ -1,0 +1,25 @@
+Godot Engine v4.3.stable.official.77dcf97d8 - https://godotengine.org
+
+savepack: begin: Packing steps: 102
+	savepack: step 2: Storing File: res://.godot/imported/icon.svg-56083ea2a1f1a4f1e49773bdc6d7826c.ctex
+	savepack: step 2: Storing File: res://assets/icon.svg.import
+	savepack: step 14: Storing File: res://.godot/exported/133200997/export-3ad5c15c4f3250da0cc7c1af1770d85f-main.scn
+WARNING: Node './TouchUI' was modified from inside an instance, but it has vanished.
+     at: instantiate (scene/resources/packed_scene.cpp:254)
+	savepack: step 27: Storing File: res://.godot/exported/133200997/export-234fb6894ec6226e856ab7f825500d3d-player.scn
+	savepack: step 39: Storing File: res://.godot/exported/133200997/export-fa5c83e150d9c11af4b4de1a3c4c54c0-touch_ui.scn
+	savepack: step 52: Storing File: res://scripts/main.gdc
+	savepack: step 64: Storing File: res://scripts/player_controller.gdc
+	savepack: step 77: Storing File: res://scripts/touch_controller.gdc
+	savepack: step 89: Storing File: res://metadata.json
+	savepack: step 89: Storing File: res://scenes/main.tscn.remap
+	savepack: step 89: Storing File: res://scenes/player.tscn.remap
+	savepack: step 89: Storing File: res://scenes/touch_ui.tscn.remap
+	savepack: step 89: Storing File: res://scripts/main.gd.remap
+	savepack: step 89: Storing File: res://scripts/player_controller.gd.remap
+	savepack: step 89: Storing File: res://scripts/touch_controller.gd.remap
+	savepack: step 89: Storing File: res://.godot/global_script_class_cache.cfg
+	savepack: step 89: Storing File: res://assets/icon.svg
+	savepack: step 89: Storing File: res://.godot/uid_cache.bin
+	savepack: step 89: Storing File: res://project.binary
+savepack: end

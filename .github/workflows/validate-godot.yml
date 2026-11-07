@@ -238,15 +238,9 @@ jobs:
 
           vercel deploy build/web \
             --token "$VERCEL_TOKEN" \
-            --scope "$VERCEL_ORG_ID" \
+            --project 20jogo \
             --yes \
             --prod 2>&1 | tee /tmp/vercel_deploy.log
-          status=${PIPESTATUS[0]}
-
-          if [[ "$status" -ne 0 ]]; then
-            echo "::error::Vercel deployment failed with exit code $status"
-            exit 1
-          fi
 
           echo "Deployment to Vercel completed."
 

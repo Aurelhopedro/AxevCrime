@@ -221,13 +221,18 @@ jobs:
       # ── PUBLICAÇÃO VERCEL (condicional — requer VERCEL_TOKEN) ───────
 
       - name: Deploy to Vercel
-        if: ${{ github.ref == 'refs/heads/main' && secrets.VERCEL_TOKEN != '' }}
+        if: github.ref == 'refs/heads/main'
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: team_d9e3cG3agie2arGYiSLU4Ews
           VERCEL_PROJECT_ID: prj_yVmlCjThD82Qj1vJvgvOxC9dqmMa
         run: |
           set -euo pipefail
+
+          if [[ -z "${VERCEL_TOKEN:-}" ]]; then
+            echo "VERCEL_TOKEN not configured — skipping deployment."
+            exit 0
+          fi
 
           npm install -g vercel@latest --quiet
 

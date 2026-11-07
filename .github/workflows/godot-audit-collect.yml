@@ -135,10 +135,11 @@ jobs:
             echo "Copiado: assets/ (filtrado)"
           fi
 
-          # Configurações do projecto
-          cp project.godot GODOT_AUDIT_TEMP/project.godot
-          cp export_presets.cfg GODOT_AUDIT_TEMP/export_presets.cfg
-          echo "Copiado: project.godot e export_presets.cfg"
+          # NOTA: project.godot e export_presets.cfg NÃO são copiados para
+          # GODOT_AUDIT_TEMP porque a presença de project.godot numa
+          # subpasta da raiz do projecto faz o Godot emitir o aviso
+          # "Detected another project.godot" durante a importação.
+          # Os logs e o build_web já contêm toda a informação de auditoria.
 
           # ── Ficheiros gerados pela exportação Web ──────────────────
           if [[ -d build/web ]]; then
@@ -156,36 +157,38 @@ jobs:
           echo "Logs copiados (se existirem)."
 
           # ── Metadados de auditoria ─────────────────────────────────
-          cat > GODOT_AUDIT_TEMP/AUDIT_INFO.md << 'MDEOF'
-          # GODOT_AUDIT_TEMP — Pasta de Auditoria
+          TIMESTAMP=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+          cat > GODOT_AUDIT_TEMP/AUDIT_INFO.md << MDEOF
+# GODOT_AUDIT_TEMP — Pasta de Auditoria
 
-          Esta pasta é gerada automaticamente pelo workflow
-          `.github/workflows/godot-audit-collect.yml` e destina-se
-          exclusivamente à análise do projecto Godot.
+Esta pasta é gerada automaticamente pelo workflow
+\`.github/workflows/godot-audit-collect.yml\` e destina-se
+exclusivamente à análise do projecto Godot.
 
-          ## Conteúdo
+## Conteúdo
 
-          | Pasta / Ficheiro      | Origem                                        |
-          |-----------------------|-----------------------------------------------|
-          | `scenes/`             | Cenas originais do projecto (`.tscn`)         |
-          | `scripts/`            | Scripts originais do projecto (`.gd`)         |
-          | `assets/`             | Texturas e recursos filtrados                 |
-          | `build_web/`          | Ficheiros gerados pela exportação Web         |
-          | `logs/`               | Logs do processo de importação e exportação   |
-          | `project.godot`       | Configuração principal do projecto            |
-          | `export_presets.cfg`  | Configuração de exportação                    |
+| Pasta / Ficheiro      | Origem                                        |
+|-----------------------|-----------------------------------------------|
+| \`scenes/\`             | Cenas originais do projecto (\`.tscn\`)         |
+| \`scripts/\`            | Scripts originais do projecto (\`.gd\`)         |
+| \`assets/\`             | Texturas e recursos filtrados                 |
+| \`build_web/\`          | Ficheiros gerados pela exportação Web         |
+| \`logs/\`               | Logs do processo de importação e exportação   |
 
-          ## Regras
+## Regras
 
-          - Esta pasta **não afecta** o funcionamento do jogo.
-          - Pode ser **apagada manualmente** sem qualquer consequência.
-          - Nenhum ficheiro original foi modificado.
-          - Nenhuma credencial ou token está incluído.
+- Esta pasta **não afecta** o funcionamento do jogo.
+- Pode ser **apagada manualmente** sem qualquer consequência.
+- Nenhum ficheiro original foi modificado.
+- Nenhuma credencial ou token está incluído.
+- **project.godot NÃO é copiado** aqui para evitar o aviso de Godot
+  "Detected another project.godot at res://GODOT_AUDIT_TEMP".
 
-          ## Gerado em
+## Gerado em
 
-          Workflow executado manualmente via GitHub Actions.
-          MDEOF
+Workflow executado manualmente via GitHub Actions.
+Data: $TIMESTAMP
+MDEOF
 
           echo ""
           echo "── Conteúdo de GODOT_AUDIT_TEMP ─────────────────────"

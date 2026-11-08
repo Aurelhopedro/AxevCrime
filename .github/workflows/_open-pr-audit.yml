@@ -1,73 +1,11 @@
-name: Abrir Pull Request (uso único)
+# Este ficheiro está inerte — não tem triggers e nunca executa.
+# Pode ser apagado manualmente sem qualquer consequência.
+# Foi criado como auxiliar da Missão 03 e não é necessário.
+#
+# Para apagar: GitHub → Code → .github/workflows → _open-pr-audit.yml → Delete file
 
-# ============================================================================
-# Workflow auxiliar — cria o PR do branch audit/apk-size-workflow → main
-# Executar UMA vez manualmente; depois pode ser eliminado ou ignorado.
-# NÃO faz merge automático.
-# ============================================================================
+name: _INERTE (apagar)
 
-on:
-  workflow_dispatch:
+on: {}
 
-permissions:
-  contents: read
-  pull-requests: write
-
-jobs:
-  open-pr:
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Criar Pull Request via gh CLI
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh pr create \
-            --title "feat(audit): workflow de auditoria profunda do APK Android" \
-            --body "## Missão 03 — Workflow de Auditoria do APK
-
-Este PR adiciona \`.github/workflows/audit-apk-size.yml\`, um workflow de auditoria completa e não-destrutiva do APK Android do AXEV CRIME.
-
-### O que faz
-
-- Mede o tamanho real de todos os ficheiros versionados (top 20)
-- Audita \`The_Soldier.glb\` e \`animations.glb\` internamente (animações, materiais, texturas, bones)
-- Importa o projecto com Godot 4.3 headless e mede \`.godot/imported\`
-- Gera um APK de auditoria com as configurações reais do projecto
-- Analisa o APK: tamanho comprimido/descomprimido, bibliotecas nativas, assets, DEX, top 20 ficheiros internos
-- Verifica se \`animations.glb\` entra efectivamente na exportação
-- Gera \`audit-report.md\` e \`audit-report.json\` com distinção clara entre valores medidos, estimados e não disponíveis
-
-### Garantias
-
-- Não apaga, modifica nem commita nada no repositório
-- Não elimina artefactos anteriores  
-- O APK é gerado exclusivamente para auditoria
-- Todos os workflows existentes permanecem intactos
-
-### Artefactos produzidos (retention separada)
-
-| Artefacto | Conteúdo | Retenção |
-| --- | --- | --- |
-| \`audit-apk-report-N\` | \`audit-report.md\` + \`audit-report.json\` | 30 dias |
-| \`audit-apk-android-N\` | APK de auditoria | 7 dias |
-| \`audit-logs-N\` | Logs, listagens, dados JSON intermédios | 7 dias |
-
-### Como executar
-
-Após merge: **GitHub Actions → Audit APK Size → Run workflow**
-
-### Revisão necessária
-
-- [ ] Verificar sintaxe YAML
-- [ ] Confirmar paths e comandos
-- [ ] Confirmar permissões (\`contents: read\`)
-- [ ] Executar manualmente e validar relatório gerado
-
-**Sem merge automático — requer aprovação manual.**" \
-            --base main \
-            --head audit/apk-size-workflow \
-            --draft=false
-          echo "✓ Pull Request criado."
+jobs: {}

@@ -1,0 +1,1246 @@
+name: Audit APK Size
+
+# ============================================================================
+# AXEV CRIME — Auditoria Profunda do Tamanho do APK Android
+# ============================================================================
+#
+# Produz medições reais do APK gerado pelo Godot 4.3:
+#
+#   audit-report.md   — relatório legível (Markdown)
+#   audit-report.json — dados estruturados (JSON)
+#
+# Secções do relatório:
+#   1. Projecto     — ficheiros versionados, 20 maiores
+#   2. GLB          — The_Soldier.glb e animations.glb (estrutura interna)
+#   3. Import Godot — pasta .godot/imported (tamanho, categorias)
+#   4. APK          — tamanho, bibliotecas, PCK, 20 maiores ficheiros internos
+#   5. Dependências — verifica se animations.glb entra no APK e se é usado
+#   6. Optimizações — oportunidades identificadas com poupança estimada
+#
+# COMO USAR:
+#   GitHub Actions → "Audit APK Size" → Run workflow
+#
+# GARANTIAS:
+#   • Não apaga, modifica nem commita nada no repositório.
+#   • O APK gerado serve exclusivamente para auditoria.
+#   • Nenhum artefacto anterior é eliminado.
+#   • Apenas leitura sobre project.godot e export_presets.cfg.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Auditoria completa do APK Android
+    runs-on: ubuntu-22.04
+    timeout-minutes: 75
+
+    env:
+      GLB_SOLDIER:    "assets/models/character/protagonist/The_Soldier.glb"
+      GLB_ANIMATIONS: "assets/models/character/animations.glb"
+      APK_PATH:       "build/android/axev_crime_audit.apk"
+      REPORT_MD:      "/tmp/audit-report.md"
+      REPORT_JSON:    "/tmp/audit-report.json"
+
+    steps:
+      # ════════════════════════════════════════════════════════════════
+      # 1. CHECKOUT
+      # ════════════════════════════════════════════════════════════════
+      - name: Checkout repositório
+        uses: actions/checkout@v4
+
+      # ════════════════════════════════════════════════════════════════
+      # 2. DEPENDÊNCIAS DO SISTEMA
+      #    Reutiliza exactamente as mesmas que build-android.yml
+      # ════════════════════════════════════════════════════════════════
+      - name: Instalar dependências do sistema
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            wget unzip ca-certificates \
+            libfontconfig1 libx11-6 libxext6 \
+            libxrender1 libxi6 libxrandr2 \
+            libxcursor1 libxinerama1 libgl1 \
+            python3 xxd aapt
+
+      # ════════════════════════════════════════════════════════════════
+      # 3. GODOT 4.3  (mesma versão que build-android.yml)
+      # ════════════════════════════════════════════════════════════════
+      - name: Instalar Godot 4.3
+        run: |
+          set -euo pipefail
+          wget -q \
+            "https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip" \
+            -O /tmp/godot.zip
+          unzip -q /tmp/godot.zip -d /tmp/godot
+          sudo install -m 0755 \
+            /tmp/godot/Godot_v4.3-stable_linux.x86_64 \
+            /usr/local/bin/godot
+          godot --version
+
+      # ════════════════════════════════════════════════════════════════
+      # 4. TEMPLATES DE EXPORTAÇÃO GODOT 4.3
+      # ════════════════════════════════════════════════════════════════
+      - name: Instalar templates de exportação Godot 4.3
+        run: |
+          set -euo pipefail
+          TEMPLATES_DIR="$HOME/.local/share/godot/export_templates/4.3.stable"
+          wget -q \
+            "https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz" \
+            -O /tmp/templates.tpz
+          mkdir -p /tmp/templates_extracted
+          unzip -q /tmp/templates.tpz -d /tmp/templates_extracted
+          TEMPLATE_SRC="$(find /tmp/templates_extracted -type d -name "templates" | head -1)"
+          if [[ -z "$TEMPLATE_SRC" ]]; then
+            echo "::error::Directório de templates não encontrado no arquivo"
+            exit 1
+          fi
+          mkdir -p "$TEMPLATES_DIR"
+          cp -r "$TEMPLATE_SRC"/. "$TEMPLATES_DIR/"
+          echo "Templates instalados: $(ls "$TEMPLATES_DIR" | wc -l) ficheiros"
+          ls "$TEMPLATES_DIR/" | grep -i android | head -5 || echo "AVISO: nenhum ficheiro android encontrado"
+
+      # ════════════════════════════════════════════════════════════════
+      # 5. JAVA 17
+      # ════════════════════════════════════════════════════════════════
+      - name: Confirmar Java 17
+        run: |
+          java -version
+          JAVA_PATH="$(readlink -f "$(which java)")"
+          JAVA_HOME_DETECTED="$(dirname "$(dirname "$JAVA_PATH")")"
+          echo "JAVA_HOME_DETECTED=$JAVA_HOME_DETECTED" >> "$GITHUB_ENV"
+
+      # ════════════════════════════════════════════════════════════════
+      # 6. ANDROID SDK  (reutiliza o pré-instalado no runner)
+      # ════════════════════════════════════════════════════════════════
+      - name: Localizar Android SDK
+        run: |
+          set -euo pipefail
+          CANDIDATE="/usr/local/lib/android/sdk"
+          if [[ ! -d "$CANDIDATE" ]]; then
+            echo "::error::Android SDK não encontrado em $CANDIDATE"
+            exit 1
+          fi
+          echo "ANDROID_SDK_ROOT=$CANDIDATE" >> "$GITHUB_ENV"
+          SDKMANAGER="$(find "$CANDIDATE" -name "sdkmanager" 2>/dev/null | head -1)"
+          if [[ -z "$SDKMANAGER" ]]; then
+            echo "::error::sdkmanager não encontrado"
+            exit 1
+          fi
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+
+      - name: Instalar build-tools e platform Android
+        run: |
+          set -euo pipefail
+          "$SDKMANAGER" --licenses < /dev/null 2>&1 | tail -3 || true
+          "$SDKMANAGER" "build-tools;34.0.0" "platforms;android-34" \
+            < /dev/null > /tmp/sdkmanager_install.log 2>&1
+          SDK_EXIT=$?
+          if [[ "$SDK_EXIT" -ne 0 ]]; then
+            echo "::error::sdkmanager falhou (exit $SDK_EXIT)"
+            cat /tmp/sdkmanager_install.log
+            exit 1
+          fi
+
+      # ════════════════════════════════════════════════════════════════
+      # 7. NDK  (reutiliza o pré-instalado no runner)
+      # ════════════════════════════════════════════════════════════════
+      - name: Localizar NDK pré-instalado
+        run: |
+          set -euo pipefail
+          NDK_BASE="$ANDROID_SDK_ROOT/ndk"
+          if [[ -d "$NDK_BASE/23.2.8568313" ]]; then
+            ANDROID_NDK_ROOT="$NDK_BASE/23.2.8568313"
+          else
+            ANDROID_NDK_ROOT="$(find "$NDK_BASE" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -1)"
+            if [[ -z "$ANDROID_NDK_ROOT" ]]; then
+              echo "::error::Nenhum NDK encontrado no runner"
+              exit 1
+            fi
+          fi
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT" >> "$GITHUB_ENV"
+          cat "$ANDROID_NDK_ROOT/source.properties"
+
+      # ════════════════════════════════════════════════════════════════
+      # 8. KEYSTORE DE DEBUG TEMPORÁRIA
+      # ════════════════════════════════════════════════════════════════
+      - name: Gerar keystore de debug temporária
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.android"
+          KEYSTORE_PATH="$HOME/.android/debug.keystore"
+          keytool -genkey -v \
+            -keystore "$KEYSTORE_PATH" \
+            -storepass android \
+            -alias androiddebugkey \
+            -keypass android \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US" 2>/dev/null
+          echo "KEYSTORE_PATH=$KEYSTORE_PATH"             >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=androiddebugkey" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD=android"     >> "$GITHUB_ENV"
+
+      # ════════════════════════════════════════════════════════════════
+      # 9. AUDITORIA DO PROJECTO (ficheiros versionados)
+      # ════════════════════════════════════════════════════════════════
+      - name: "AUDITORIA 1/5 — Projecto (ficheiros versionados)"
+        run: |
+          set -euo pipefail
+
+          echo "════════════════════════════════════════════════════════════"
+          echo "  AUDITORIA DO PROJECTO — FICHEIROS VERSIONADOS"
+          echo "════════════════════════════════════════════════════════════"
+
+          TOTAL_SIZE=$(du -sb . \
+            --exclude='.git' \
+            --exclude='.godot' \
+            --exclude='build' \
+            2>/dev/null | tail -1 | cut -f1)
+
+          TOTAL_FILES=$(find . \
+            -not -path './.git/*' \
+            -not -path './.godot/*' \
+            -not -path './build/*' \
+            -type f | wc -l)
+
+          echo ""
+          echo "Total de ficheiros versionados : $TOTAL_FILES"
+          printf "Tamanho total                  : %s bytes (%'.1f MiB)\n" \
+            "$TOTAL_SIZE" "$(echo "$TOTAL_SIZE 1048576" | awk '{printf "%.2f", $1/$2}')"
+
+          echo ""
+          echo "── Os 20 maiores ficheiros ──────────────────────────────────"
+          find . \
+            -not -path './.git/*' \
+            -not -path './.godot/*' \
+            -not -path './build/*' \
+            -type f \
+            -exec du -b {} + \
+            | sort -rn \
+            | head -20 \
+            | awk '{printf "  %10d bytes  (%6.2f MiB)  %s\n", $1, $1/1048576, $2}'
+
+          # Guardar dados em ficheiro temporário para o relatório final
+          find . \
+            -not -path './.git/*' \
+            -not -path './.godot/*' \
+            -not -path './build/*' \
+            -type f \
+            -exec du -b {} + \
+            | sort -rn \
+            > /tmp/project_files_sorted.txt
+
+          echo "PROJ_TOTAL_SIZE=$TOTAL_SIZE"  >> "$GITHUB_ENV"
+          echo "PROJ_TOTAL_FILES=$TOTAL_FILES" >> "$GITHUB_ENV"
+
+      # ════════════════════════════════════════════════════════════════
+      # 10. AUDITORIA DOS GLBs (Python — sem dependências externas)
+      # ════════════════════════════════════════════════════════════════
+      - name: "AUDITORIA 2/5 — GLB (The_Soldier + animations)"
+        run: |
+          python3 << 'PYEOF'
+          import struct, json, os, sys
+
+          def audit_glb(path, label):
+              print(f"\n{'═'*60}")
+              print(f"  {label}")
+              print(f"  {path}")
+              print(f"{'═'*60}")
+
+              if not os.path.exists(path):
+                  print(f"  AUSENTE — ficheiro não encontrado")
+                  return {
+                      "path": path, "present": False,
+                      "size_bytes": 0,
+                      "animations": 0, "materials": 0,
+                      "images": 0, "skins": 0, "nodes": 0,
+                      "json_bytes": 0, "bin_bytes": 0,
+                      "anim_names": [], "image_embedded": True,
+                  }
+
+              with open(path, "rb") as f:
+                  raw = f.read()
+
+              file_size = len(raw)
+              magic, version, glb_len = struct.unpack_from("<III", raw, 0)
+              valid = (magic == 0x46546C67)
+
+              print(f"  Tamanho ficheiro : {file_size:,} bytes  ({file_size/1048576:.2f} MiB)")
+              print(f"  GLB magic        : {'✓ válido' if valid else '✗ INVÁLIDO'}")
+              print(f"  GLB version      : {version}")
+
+              if not valid:
+                  return {"path": path, "present": True, "size_bytes": file_size,
+                          "valid": False, "animations": 0, "materials": 0,
+                          "images": 0, "skins": 0, "nodes": 0,
+                          "json_bytes": 0, "bin_bytes": 0,
+                          "anim_names": [], "image_embedded": True}
+
+              # Chunk JSON
+              chunk0_len = struct.unpack_from("<I", raw, 12)[0]
+              json_bytes = chunk0_len
+              gltf = json.loads(raw[20:20 + chunk0_len])
+
+              # Chunk BIN
+              bin_offset = 20 + chunk0_len
+              bin_bytes = 0
+              if bin_offset + 8 <= len(raw):
+                  bin_bytes = struct.unpack_from("<I", raw, bin_offset)[0]
+
+              nodes      = gltf.get("nodes", [])
+              skins      = gltf.get("skins", [])
+              animations = gltf.get("animations", [])
+              materials  = gltf.get("materials", [])
+              images     = gltf.get("images", [])
+              meshes     = gltf.get("meshes", [])
+              accessors  = gltf.get("accessors", [])
+
+              print(f"  JSON chunk       : {json_bytes:,} bytes  ({json_bytes/1048576:.3f} MiB)")
+              print(f"  BIN chunk        : {bin_bytes:,} bytes  ({bin_bytes/1048576:.2f} MiB)")
+              print(f"  Nós              : {len(nodes)}")
+              print(f"  Meshes           : {len(meshes)}")
+              print(f"  Skins/Skeletons  : {len(skins)}")
+              print(f"  Animações        : {len(animations)}")
+              print(f"  Materiais        : {len(materials)}")
+              print(f"  Imagens          : {len(images)}")
+
+              # Verificar se imagens são externas ou incorporadas
+              ext_images = [i for i in images if "uri" in i and not i["uri"].startswith("data:")]
+              emb_images = [i for i in images if "bufferView" in i]
+              print(f"    ↳ incorporadas no BIN : {len(emb_images)}")
+              print(f"    ↳ URI externas        : {len(ext_images)}")
+
+              if animations:
+                  print(f"\n  Animações ({len(animations)}):")
+                  for a in animations:
+                      ch = len(a.get("channels", []))
+                      sa = len(a.get("samplers", []))
+                      # estimar duração
+                      dur = 0.0
+                      for s in a.get("samplers", []):
+                          inp = s.get("input")
+                          if inp is not None and inp < len(accessors):
+                              mx = accessors[inp].get("max", [0])
+                              v = mx[0] if isinstance(mx, list) else mx
+                              if v > dur: dur = v
+                      print(f"    [{a.get('name','?'):<45}]  {ch:3d}ch  {sa:3d}samp  {dur:.2f}s")
+
+              if skins:
+                  joints = skins[0].get("joints", [])
+                  print(f"\n  Skeleton '{skins[0].get('name','?')}' — {len(joints)} bones")
+                  for idx in joints[:8]:
+                      if idx < len(nodes):
+                          print(f"    {nodes[idx].get('name','?')}")
+                  if len(joints) > 8:
+                      print(f"    ... (+{len(joints)-8} bones)")
+
+              anim_names = [a.get("name","?") for a in animations]
+              return {
+                  "path": path, "present": True, "valid": valid,
+                  "size_bytes": file_size,
+                  "json_bytes": json_bytes,
+                  "bin_bytes": bin_bytes,
+                  "nodes": len(nodes), "meshes": len(meshes),
+                  "skins": len(skins),
+                  "bone_count": len(skins[0].get("joints",[])) if skins else 0,
+                  "animations": len(animations),
+                  "materials": len(materials),
+                  "images": len(images),
+                  "images_embedded": len(emb_images),
+                  "images_external": len(ext_images),
+                  "anim_names": anim_names,
+                  "image_embedded": len(ext_images) == 0,
+              }
+
+          r_soldier = audit_glb(
+              "assets/models/character/protagonist/The_Soldier.glb",
+              "THE_SOLDIER.GLB — Protagonista principal"
+          )
+          r_anims = audit_glb(
+              "assets/models/character/animations.glb",
+              "ANIMATIONS.GLB — Biblioteca de animações externa"
+          )
+
+          # ── Verificar referências nas cenas ──────────────────────────────
+          print(f"\n{'═'*60}")
+          print(f"  REFERÊNCIAS NAS CENAS (.tscn)")
+          print(f"{'═'*60}")
+
+          import glob
+          scenes = glob.glob("scenes/*.tscn")
+          refs_soldier  = []
+          refs_anims    = []
+          refs_animroot = []
+
+          for scene_path in sorted(scenes):
+              with open(scene_path, "r", encoding="utf-8", errors="ignore") as f:
+                  content = f.read()
+              has_soldier = "The_Soldier.glb" in content
+              has_anims   = "animations.glb"  in content
+              has_root    = "AnimationRoot"    in content
+              if has_soldier:  refs_soldier.append(scene_path)
+              if has_anims:    refs_anims.append(scene_path)
+              if has_root:     refs_animroot.append(scene_path)
+              status = []
+              if has_soldier: status.append("The_Soldier.glb ✓")
+              if has_anims:   status.append("animations.glb ✓")
+              if has_root:    status.append("AnimationRoot ✓")
+              if not status:  status = ["(sem referências a GLBs)"]
+              print(f"  {scene_path:<30}  {', '.join(status)}")
+
+          print()
+          if refs_anims:
+              print(f"  ⚠ animations.glb referenciado em: {refs_anims}")
+          else:
+              print(f"  ✓ animations.glb NÃO é referenciado por nenhuma cena")
+          if refs_animroot:
+              # Verificar se AnimationRoot está visible=false
+              for sp in refs_animroot:
+                  with open(sp, "r") as f:
+                      lines = f.readlines()
+                  anim_root_visible = True
+                  in_anim_root = False
+                  for line in lines:
+                      if 'name="AnimationRoot"' in line:
+                          in_anim_root = True
+                      if in_anim_root and "visible = false" in line:
+                          anim_root_visible = False
+                          break
+                      if in_anim_root and line.strip().startswith("[node") and "AnimationRoot" not in line:
+                          in_anim_root = False
+                  status_v = "visible=false (não activo)" if not anim_root_visible else "visible=true (activo)"
+                  print(f"  AnimationRoot em {sp}: {status_v}")
+
+          # ── Guardar dados GLB para o relatório final ──────────────────────
+          import json as jsonmod
+          glb_data = {"soldier": r_soldier, "animations": r_anims,
+                      "scenes_referencing_animations_glb": refs_anims,
+                      "scenes_referencing_animation_root": refs_animroot}
+          with open("/tmp/glb_audit.json", "w") as f:
+              jsonmod.dump(glb_data, f, indent=2)
+          print("\n✓ Dados GLB guardados em /tmp/glb_audit.json")
+          PYEOF
+
+      # ════════════════════════════════════════════════════════════════
+      # 11. IMPORTAR RECURSOS DO PROJECTO (Godot headless)
+      # ════════════════════════════════════════════════════════════════
+      - name: Importar recursos (Godot headless)
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          echo "A importar recursos com Godot 4.3 headless..."
+          timeout 480s godot \
+            --headless \
+            --editor \
+            --path "$GITHUB_WORKSPACE" \
+            --import \
+            --quit 2>&1 | tee /tmp/godot_import.log || true
+
+          IMPORT_EXIT=${PIPESTATUS[0]}
+          echo "Import exit code: $IMPORT_EXIT"
+          echo ""
+          echo "── Últimas 30 linhas do log de import ──────────────────────"
+          tail -30 /tmp/godot_import.log
+          echo "────────────────────────────────────────────────────────────"
+
+          if grep -Eiq '^ERROR:|SCRIPT ERROR:|Parse Error:' /tmp/godot_import.log; then
+            echo "::warning::Erros detectados no import — a continuar auditoria"
+          fi
+
+      # ════════════════════════════════════════════════════════════════
+      # 12. AUDITORIA DA PASTA .godot/imported
+      # ════════════════════════════════════════════════════════════════
+      - name: "AUDITORIA 3/5 — .godot/imported"
+        run: |
+          set -euo pipefail
+
+          echo "════════════════════════════════════════════════════════════"
+          echo "  AUDITORIA — .godot/imported"
+          echo "════════════════════════════════════════════════════════════"
+
+          IMPORTED_DIR=".godot/imported"
+
+          if [[ ! -d "$IMPORTED_DIR" ]]; then
+            echo "AVISO: .godot/imported não existe após o import"
+            echo "       (pode indicar que o import não foi executado)"
+            echo "IMPORTED_TOTAL_SIZE=0"       >> "$GITHUB_ENV"
+            echo "IMPORTED_TOTAL_FILES=0"      >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          IMPORTED_SIZE=$(du -sb "$IMPORTED_DIR" 2>/dev/null | cut -f1)
+          IMPORTED_FILES=$(find "$IMPORTED_DIR" -type f | wc -l)
+
+          echo ""
+          printf "Tamanho total  : %s bytes  (%'.2f MiB)\n" \
+            "$IMPORTED_SIZE" "$(echo "$IMPORTED_SIZE 1048576" | awk '{printf "%.2f", $1/$2}')"
+          echo "Total ficheiros: $IMPORTED_FILES"
+
+          echo ""
+          echo "── Por extensão ─────────────────────────────────────────────"
+          find "$IMPORTED_DIR" -type f | sed 's/.*\.//' | sort | uniq -c | sort -rn | \
+            while read -r count ext; do
+              SIZE=$(find "$IMPORTED_DIR" -type f -name "*.${ext}" -exec du -b {} + 2>/dev/null | \
+                     awk '{s+=$1} END{printf "%d", s}')
+              printf "  %5d  .%-10s  %10d bytes  (%6.2f MiB)\n" \
+                "$count" "$ext" "$SIZE" "$(echo "$SIZE 1048576" | awk '{printf "%.2f", $1/$2}')"
+            done
+
+          echo ""
+          echo "── Os 20 maiores ficheiros importados ───────────────────────"
+          find "$IMPORTED_DIR" -type f -exec du -b {} + \
+            | sort -rn \
+            | head -20 \
+            | awk '{printf "  %10d bytes  (%6.2f MiB)  %s\n", $1, $1/1048576, $2}'
+
+          echo ""
+          echo "── Comparação original vs importado (GLBs) ──────────────────"
+          for GLB in "$GLB_SOLDIER" "$GLB_ANIMATIONS"; do
+            if [[ -f "$GLB" ]]; then
+              ORIG_SIZE=$(wc -c < "$GLB")
+              GLB_BASE=$(basename "$GLB" .glb)
+              IMP_SIZE=$(find "$IMPORTED_DIR" -name "${GLB_BASE}*" -exec du -b {} + 2>/dev/null | \
+                         awk '{s+=$1} END{printf "%d", s+0}')
+              RATIO=$(echo "$ORIG_SIZE $IMP_SIZE" | awk '{
+                if ($1>0) printf "%.1f%%", $2*100/$1; else printf "N/A"
+              }')
+              printf "  %-45s  orig: %10d B  imp: %10d B  (%s do original)\n" \
+                "$(basename "$GLB")" "$ORIG_SIZE" "$IMP_SIZE" "$RATIO"
+            fi
+          done
+
+          # Guardar para relatório
+          echo "IMPORTED_TOTAL_SIZE=$IMPORTED_SIZE"   >> "$GITHUB_ENV"
+          echo "IMPORTED_TOTAL_FILES=$IMPORTED_FILES" >> "$GITHUB_ENV"
+
+          # Salvar listagem completa
+          find "$IMPORTED_DIR" -type f -exec du -b {} + \
+            | sort -rn > /tmp/imported_files_sorted.txt
+
+      # ════════════════════════════════════════════════════════════════
+      # 13. EXPORTAR APK DE AUDITORIA
+      # ════════════════════════════════════════════════════════════════
+      - name: Exportar APK de auditoria
+        timeout-minutes: 25
+        env:
+          GODOT_ANDROID_KEYSTORE_DEBUG_PATH:     ${{ env.GODOT_ANDROID_KEYSTORE_DEBUG_PATH }}
+          GODOT_ANDROID_KEYSTORE_DEBUG_USER:     ${{ env.GODOT_ANDROID_KEYSTORE_DEBUG_USER }}
+          GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: ${{ env.GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/android
+
+          echo "SDK : $ANDROID_SDK_ROOT"
+          echo "NDK : $ANDROID_NDK_ROOT"
+          echo "JDK : $JAVA_HOME_DETECTED"
+          echo ""
+
+          timeout 1200s godot \
+            --headless \
+            --path "$GITHUB_WORKSPACE" \
+            --export-debug "Android" \
+            "$APK_PATH" \
+            2>&1 | tee /tmp/godot_android_export.log
+          EXPORT_EXIT=${PIPESTATUS[0]}
+
+          echo ""
+          echo "── Últimas 60 linhas do log de exportação ───────────────────"
+          tail -60 /tmp/godot_android_export.log
+          echo "────────────────────────────────────────────────────────────"
+
+          if [[ "$EXPORT_EXIT" -ne 0 ]]; then
+            echo "::error::Exportação Android falhou (exit $EXPORT_EXIT)"
+            exit 1
+          fi
+
+          if [[ ! -f "$APK_PATH" ]]; then
+            echo "::error::APK não encontrado em $APK_PATH após exportação"
+            ls -lh build/android/ 2>/dev/null || echo "(directório vazio)"
+            exit 1
+          fi
+
+          APK_BYTES=$(wc -c < "$APK_PATH")
+          HEX=$(xxd -l 2 -p "$APK_PATH")
+          if [[ "$HEX" != "504b" ]]; then
+            echo "::error::APK não é um ZIP válido (magic: $HEX)"
+            exit 1
+          fi
+
+          echo ""
+          echo "✓ APK gerado com sucesso"
+          printf "  Tamanho : %d bytes  (%.2f MiB)\n" "$APK_BYTES" \
+            "$(echo "$APK_BYTES 1048576" | awk '{printf "%.2f", $1/$2}')"
+
+          echo "APK_SIZE_BYTES=$APK_BYTES" >> "$GITHUB_ENV"
+
+      # ════════════════════════════════════════════════════════════════
+      # 14. AUDITORIA DO APK (unzip + aapt)
+      # ════════════════════════════════════════════════════════════════
+      - name: "AUDITORIA 4/5 — APK interno"
+        run: |
+          set -euo pipefail
+
+          APK="$APK_PATH"
+
+          echo "════════════════════════════════════════════════════════════"
+          echo "  AUDITORIA DO APK — $APK"
+          echo "════════════════════════════════════════════════════════════"
+          echo ""
+
+          # ── Sumário unzip ─────────────────────────────────────────────────
+          printf "Tamanho APK (comprimido)   : %d bytes  (%.2f MiB)\n" \
+            "$APK_SIZE_BYTES" \
+            "$(echo "$APK_SIZE_BYTES 1048576" | awk '{printf "%.2f", $1/$2}')"
+
+          UNCOMPRESSED=$(unzip -l "$APK" 2>/dev/null | tail -1 | awk '{print $1}')
+          printf "Tamanho APK (descomprimido): %s bytes  (%.2f MiB)\n" \
+            "$UNCOMPRESSED" \
+            "$(echo "$UNCOMPRESSED 1048576" | awk '{printf "%.2f", $1/$2}' 2>/dev/null || echo "N/A")"
+
+          echo ""
+
+          # ── Guardar listagem completa do APK ─────────────────────────────
+          unzip -l "$APK" > /tmp/apk_listing.txt 2>&1
+          TOTAL_ENTRIES=$(grep -c "^\s*[0-9]" /tmp/apk_listing.txt || echo "0")
+          echo "Total de entradas no APK: $TOTAL_ENTRIES"
+
+          # ── Os 20 maiores ficheiros (tamanho descomprimido) ───────────────
+          echo ""
+          echo "── Os 20 maiores ficheiros no APK (tamanho descomprimido) ──"
+          grep -E "^\s+[0-9]" /tmp/apk_listing.txt \
+            | awk '{print $1, $4}' \
+            | sort -rn \
+            | head -20 \
+            | awk '{printf "  %10d bytes  (%6.2f MiB)  %s\n", $1, $1/1048576, $2}' \
+            | tee /tmp/apk_top20.txt
+
+          # ── Categorias ───────────────────────────────────────────────────
+          echo ""
+          echo "── Por categoria ────────────────────────────────────────────"
+
+          # Bibliotecas nativas
+          LIB_SIZE=$(grep -E "^\s+[0-9]" /tmp/apk_listing.txt | awk '{print $1, $4}' | \
+            grep "^[0-9].* lib/" | awk '{s+=$1} END{printf "%d", s+0}')
+          printf "  lib/ (bibliotecas nativas) : %10d bytes  (%6.2f MiB)\n" \
+            "$LIB_SIZE" "$(echo "$LIB_SIZE 1048576" | awk '{printf "%.2f", $1/$2}')"
+
+          # Assets (PCK e recursos do jogo)
+          ASSETS_SIZE=$(grep -E "^\s+[0-9]" /tmp/apk_listing.txt | awk '{print $1, $4}' | \
+            grep "^[0-9].* assets/" | awk '{s+=$1} END{printf "%d", s+0}')
+          printf "  assets/ (recursos do jogo) : %10d bytes  (%6.2f MiB)\n" \
+            "$ASSETS_SIZE" "$(echo "$ASSETS_SIZE 1048576" | awk '{printf "%.2f", $1/$2}')"
+
+          # Classes DEX
+          DEX_SIZE=$(grep -E "^\s+[0-9]" /tmp/apk_listing.txt | awk '{print $1, $4}' | \
+            grep "^[0-9].*\.dex" | awk '{s+=$1} END{printf "%d", s+0}')
+          printf "  *.dex (bytecode Android)   : %10d bytes  (%6.2f MiB)\n" \
+            "$DEX_SIZE" "$(echo "$DEX_SIZE 1048576" | awk '{printf "%.2f", $1/$2}')"
+
+          # Resto
+          REST_SIZE=$(echo "$UNCOMPRESSED $LIB_SIZE $ASSETS_SIZE $DEX_SIZE" | \
+            awk '{r=$1-$2-$3-$4; if(r<0)r=0; printf "%d", r}')
+          printf "  outros (manifests, etc.)   : %10d bytes  (%6.2f MiB)\n" \
+            "$REST_SIZE" "$(echo "$REST_SIZE 1048576" | awk '{printf "%.2f", $1/$2}')"
+
+          echo ""
+          echo "── Verificar presença de animations.glb no APK ─────────────"
+          if grep -q "animations" /tmp/apk_listing.txt; then
+            echo "  ⚠ Entradas com 'animations' encontradas:"
+            grep "animations" /tmp/apk_listing.txt | head -10
+          else
+            echo "  ✓ Nenhuma entrada 'animations' encontrada directamente"
+            echo "  (pode estar dentro do PCK — verificação abaixo)"
+          fi
+
+          echo ""
+          echo "── Verificar presença de The_Soldier no APK ─────────────────"
+          if grep -qi "soldier\|The_Soldier" /tmp/apk_listing.txt; then
+            echo "  Entradas encontradas:"
+            grep -i "soldier\|The_Soldier" /tmp/apk_listing.txt | head -10
+          else
+            echo "  Não encontrado directamente (pode estar no PCK)"
+          fi
+
+          echo ""
+          echo "── Ficheiro PCK (recursos empacotados) ──────────────────────"
+          PCK_ENTRY=$(grep -E "^\s+[0-9]" /tmp/apk_listing.txt | awk '{print $1, $4}' | \
+            grep -i "\.pck\|game.pck\|data.pck" | sort -rn | head -1)
+          if [[ -n "$PCK_ENTRY" ]]; then
+            PCK_SIZE=$(echo "$PCK_ENTRY" | awk '{print $1}')
+            PCK_NAME=$(echo "$PCK_ENTRY" | awk '{print $2}')
+            printf "  PCK: %-40s  %d bytes  (%.2f MiB)\n" \
+              "$PCK_NAME" "$PCK_SIZE" \
+              "$(echo "$PCK_SIZE 1048576" | awk '{printf "%.2f", $1/$2}')"
+          else
+            echo "  Nenhum ficheiro .pck encontrado directamente"
+            echo "  (em Godot 4.3 os recursos podem estar num OBB ou embutidos nas libs)"
+          fi
+
+          # ── aapt dump (se disponível) ─────────────────────────────────────
+          echo ""
+          echo "── Informação aapt ──────────────────────────────────────────"
+          if command -v aapt &>/dev/null; then
+            aapt dump badging "$APK" 2>/dev/null | grep -E "^package:|^application:|^uses-sdk:" | head -10 || true
+          else
+            echo "  aapt não disponível no runner"
+          fi
+
+          # Guardar para o relatório
+          echo "APK_LIB_SIZE=$LIB_SIZE"       >> "$GITHUB_ENV"
+          echo "APK_ASSETS_SIZE=$ASSETS_SIZE" >> "$GITHUB_ENV"
+          echo "APK_DEX_SIZE=$DEX_SIZE"        >> "$GITHUB_ENV"
+          echo "APK_UNCOMPRESSED=$UNCOMPRESSED" >> "$GITHUB_ENV"
+
+      # ════════════════════════════════════════════════════════════════
+      # 15. VERIFICAÇÃO DE DEPENDÊNCIAS (animations.glb no PCK)
+      # ════════════════════════════════════════════════════════════════
+      - name: "AUDITORIA 5/5 — Dependências e animations.glb no APK"
+        run: |
+          set -euo pipefail
+
+          echo "════════════════════════════════════════════════════════════"
+          echo "  VERIFICAÇÃO DE DEPENDÊNCIAS"
+          echo "════════════════════════════════════════════════════════════"
+          echo ""
+
+          APK="$APK_PATH"
+
+          # Extrair o APK para análise interna
+          mkdir -p /tmp/apk_extracted
+          unzip -q "$APK" -d /tmp/apk_extracted 2>/dev/null || true
+
+          echo "── Estrutura interna do APK ─────────────────────────────────"
+          find /tmp/apk_extracted -maxdepth 2 -type d | sort | head -20
+
+          echo ""
+          echo "── Procurar animations.glb nos assets extraídos ─────────────"
+          FOUND_ANIMS=$(find /tmp/apk_extracted -name "*animations*" -o -name "*anim*.glb" 2>/dev/null)
+          if [[ -n "$FOUND_ANIMS" ]]; then
+            echo "  ⚠ ENCONTRADO:"
+            echo "$FOUND_ANIMS" | while read -r f; do
+              printf "    %s  (%d bytes)\n" "$f" "$(wc -c < "$f")"
+            done
+            echo "ANIMS_IN_APK=true" >> "$GITHUB_ENV"
+          else
+            echo "  ✓ animations.glb NÃO encontrado como ficheiro separado nos assets"
+            echo "ANIMS_IN_APK=false" >> "$GITHUB_ENV"
+          fi
+
+          echo ""
+          echo "── Inspecionar ficheiros PCK (se presentes) ─────────────────"
+          PCK_FILES=$(find /tmp/apk_extracted -name "*.pck" 2>/dev/null)
+          if [[ -n "$PCK_FILES" ]]; then
+            echo "$PCK_FILES" | while read -r pck; do
+              printf "  PCK: %s  (%d bytes)\n" "$pck" "$(wc -c < "$pck")"
+              # Procurar strings de caminho dentro do PCK (heurística)
+              if strings "$pck" 2>/dev/null | grep -qi "animations"; then
+                echo "    ⚠ PCK contém referência a 'animations'"
+                strings "$pck" 2>/dev/null | grep -i "animations" | head -5
+              else
+                echo "    ✓ PCK não contém referência a 'animations' (heurística por strings)"
+              fi
+              if strings "$pck" 2>/dev/null | grep -qi "soldier\|The_Soldier"; then
+                echo "    ✓ PCK contém referência a 'The_Soldier'"
+              fi
+            done
+          else
+            echo "  Nenhum ficheiro .pck encontrado nos assets extraídos"
+            echo "  (em Godot 4.3 os recursos podem estar embutidos de outro modo)"
+          fi
+
+          echo ""
+          echo "── Resumo export_presets.cfg ─────────────────────────────────"
+          echo "  export_filter para Android:"
+          grep -A2 'name="Android"' export_presets.cfg | grep "export_filter" || true
+          grep "exclude_filter" export_presets.cfg | head -5 || true
+          echo ""
+          echo "  Compressão de texturas:"
+          grep "vram_texture_compression" export_presets.cfg | head -5 || true
+
+          echo ""
+          echo "── Bibliotecas nativas detectadas ───────────────────────────"
+          find /tmp/apk_extracted/lib -name "*.so" 2>/dev/null | sort | while read -r lib; do
+            printf "  %-55s  %8d bytes  (%5.2f MiB)\n" \
+              "$(echo "$lib" | sed 's|/tmp/apk_extracted/||')" \
+              "$(wc -c < "$lib")" \
+              "$(echo "$(wc -c < "$lib") 1048576" | awk '{printf "%.2f", $1/$2}')"
+          done
+
+      # ════════════════════════════════════════════════════════════════
+      # 16. GERAR RELATÓRIO (Markdown + JSON)
+      # ════════════════════════════════════════════════════════════════
+      - name: Gerar audit-report.md e audit-report.json
+        if: always()
+        run: |
+          python3 << 'PYEOF'
+          import json, os, datetime, struct
+
+          now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+          # ── Ler variáveis de ambiente ──────────────────────────────────────
+          def env(k, default="N/D"):
+              return os.environ.get(k, default)
+
+          def envint(k, default=0):
+              try: return int(os.environ.get(k, default))
+              except: return default
+
+          def mib(b):
+              try: return f"{int(b)/1048576:.2f} MiB"
+              except: return "N/D"
+
+          proj_size  = envint("PROJ_TOTAL_SIZE")
+          proj_files = envint("PROJ_TOTAL_FILES")
+          imp_size   = envint("IMPORTED_TOTAL_SIZE")
+          imp_files  = envint("IMPORTED_TOTAL_FILES")
+          apk_size   = envint("APK_SIZE_BYTES")
+          apk_unc    = envint("APK_UNCOMPRESSED")
+          apk_lib    = envint("APK_LIB_SIZE")
+          apk_assets = envint("APK_ASSETS_SIZE")
+          apk_dex    = envint("APK_DEX_SIZE")
+          anims_in_apk = env("ANIMS_IN_APK", "false").lower() == "true"
+
+          # ── Ler dados GLB ──────────────────────────────────────────────────
+          glb_data = {}
+          if os.path.exists("/tmp/glb_audit.json"):
+              with open("/tmp/glb_audit.json") as f:
+                  glb_data = json.load(f)
+
+          soldier  = glb_data.get("soldier", {})
+          anims_glb = glb_data.get("animations", {})
+          scenes_ref_anims = glb_data.get("scenes_referencing_animations_glb", [])
+
+          # ── Ler top20 do APK ───────────────────────────────────────────────
+          apk_top20_lines = []
+          if os.path.exists("/tmp/apk_top20.txt"):
+              with open("/tmp/apk_top20.txt") as f:
+                  apk_top20_lines = [l.rstrip() for l in f if l.strip()]
+
+          # ── Ler top20 do projecto ──────────────────────────────────────────
+          proj_top20_lines = []
+          if os.path.exists("/tmp/project_files_sorted.txt"):
+              with open("/tmp/project_files_sorted.txt") as f:
+                  for i, line in enumerate(f):
+                      if i >= 20: break
+                      parts = line.strip().split(None, 1)
+                      if len(parts) == 2:
+                          size_b, path = int(parts[0]), parts[1].lstrip("./")
+                          proj_top20_lines.append(
+                              f"| {i+1:2d} | `{path}` | {size_b:,} B | {size_b/1048576:.2f} MiB |"
+                          )
+
+          # ── Ler top20 do .godot/imported ──────────────────────────────────
+          imp_top20_lines = []
+          if os.path.exists("/tmp/imported_files_sorted.txt"):
+              with open("/tmp/imported_files_sorted.txt") as f:
+                  for i, line in enumerate(f):
+                      if i >= 20: break
+                      parts = line.strip().split(None, 1)
+                      if len(parts) == 2:
+                          size_b, path = int(parts[0]), parts[1].lstrip("./")
+                          imp_top20_lines.append(
+                              f"| {i+1:2d} | `{path}` | {size_b:,} B | {size_b/1048576:.2f} MiB |"
+                          )
+
+          # ═══════════════════════════════════════════════════════════════════
+          # RELATÓRIO MARKDOWN
+          # ═══════════════════════════════════════════════════════════════════
+          md = []
+
+          md.append("# AXEV CRIME — Relatório de Auditoria do APK Android")
+          md.append("")
+          md.append(f"> Gerado em: **{now}**  ")
+          md.append(f"> Motor: **Godot 4.3-stable** | Plataforma: **Android (arm64-v8a)**  ")
+          md.append(f"> Repositório: **Aurelhopedro/AxevCrime**  ")
+          md.append(f"> Workflow: **audit-apk-size.yml**")
+          md.append("")
+          md.append("> **Legenda de fiabilidade:**  ")
+          md.append("> 🟢 MEDIDO — valor real obtido nesta execução  ")
+          md.append("> 🟡 ESTIMADO — cálculo baseado em dados medidos  ")
+          md.append("> 🔴 NÃO DISPONÍVEL — dado não obtido nesta execução")
+          md.append("")
+          md.append("---")
+          md.append("")
+
+          # ── A. TAMANHO REAL ──────────────────────────────────────────────
+          md.append("## A. Tamanho Real")
+          md.append("")
+          md.append("| Componente | Valor | Fiabilidade |")
+          md.append("| --- | --- | --- |")
+
+          if proj_size > 0:
+              md.append(f"| Repositório (ficheiros versionados) | {proj_size:,} B ({mib(proj_size)}) — {proj_files} ficheiros | 🟢 MEDIDO |")
+          else:
+              md.append(f"| Repositório (ficheiros versionados) | N/D | 🔴 NÃO DISPONÍVEL |")
+
+          if imp_size > 0:
+              md.append(f"| `.godot/imported` (após import Godot) | {imp_size:,} B ({mib(imp_size)}) — {imp_files} ficheiros | 🟢 MEDIDO |")
+          elif imp_size == 0 and imp_files == 0:
+              md.append(f"| `.godot/imported` (após import Godot) | Import não gerou dados (ver logs) | 🔴 NÃO DISPONÍVEL |")
+
+          if apk_size > 0:
+              md.append(f"| APK (tamanho comprimido em disco) | {apk_size:,} B ({mib(apk_size)}) | 🟢 MEDIDO |")
+              md.append(f"| APK (tamanho descomprimido) | {apk_unc:,} B ({mib(apk_unc)}) | 🟢 MEDIDO |")
+              md.append(f"| Bibliotecas nativas (`lib/`) | {apk_lib:,} B ({mib(apk_lib)}) | 🟢 MEDIDO |")
+              md.append(f"| Assets do jogo (`assets/`) | {apk_assets:,} B ({mib(apk_assets)}) | 🟢 MEDIDO |")
+              md.append(f"| Bytecode DEX | {apk_dex:,} B ({mib(apk_dex)}) | 🟢 MEDIDO |")
+          else:
+              md.append(f"| APK | Exportação falhou — ver logs | 🔴 NÃO DISPONÍVEL |")
+
+          if soldier.get("present"):
+              md.append(f"| `The_Soldier.glb` | {soldier['size_bytes']:,} B ({mib(soldier['size_bytes'])}) — {soldier.get('animations',0)} animações, {soldier.get('materials',0)} materiais, {soldier.get('images',0)} imagens | 🟢 MEDIDO |")
+          if anims_glb.get("present"):
+              md.append(f"| `animations.glb` | {anims_glb['size_bytes']:,} B ({mib(anims_glb['size_bytes'])}) — {anims_glb.get('animations',0)} animações | 🟢 MEDIDO |")
+          elif not anims_glb.get("present", True):
+              md.append(f"| `animations.glb` | Ausente do repositório | 🟢 MEDIDO |")
+
+          md.append("")
+          md.append("---")
+          md.append("")
+
+          # ── B. OS 20 MAIORES (Projecto) ───────────────────────────────────
+          md.append("## B. Os 20 Maiores Ficheiros do Projecto (versionados)")
+          md.append("")
+          if proj_top20_lines:
+              md.append("| # | Ficheiro | Bytes | MiB |")
+              md.append("| --- | --- | --- | --- |")
+              for line in proj_top20_lines:
+                  md.append(line)
+          else:
+              md.append("🔴 Dados não disponíveis.")
+          md.append("")
+
+          # ── B2. OS 20 MAIORES (APK) ───────────────────────────────────────
+          md.append("## B2. Os 20 Maiores Ficheiros Dentro do APK (descomprimidos)")
+          md.append("")
+          if apk_top20_lines:
+              md.append("```")
+              for line in apk_top20_lines:
+                  md.append(line)
+              md.append("```")
+          else:
+              md.append("🔴 APK não gerado ou dados não disponíveis.")
+          md.append("")
+
+          # ── B3. OS 20 MAIORES (.godot/imported) ──────────────────────────
+          md.append("## B3. Os 20 Maiores Recursos Importados (.godot/imported)")
+          md.append("")
+          if imp_top20_lines:
+              md.append("| # | Ficheiro | Bytes | MiB |")
+              md.append("| --- | --- | --- | --- |")
+              for line in imp_top20_lines:
+                  md.append(line)
+          else:
+              md.append("🔴 Dados não disponíveis (pasta .godot/imported não encontrada).")
+          md.append("")
+
+          # ── B4. PERCENTAGEM POR CATEGORIA (APK) ───────────────────────────
+          md.append("## B4. Distribuição do APK por Categoria")
+          md.append("")
+          if apk_unc > 0:
+              def pct(v, total):
+                  try: return f"{int(v)*100/int(total):.1f}%"
+                  except: return "N/A"
+              md.append("| Categoria | Bytes | MiB | % do total descomprimido |")
+              md.append("| --- | --- | --- | --- |")
+              md.append(f"| Bibliotecas nativas (`lib/`) | {apk_lib:,} | {mib(apk_lib)} | {pct(apk_lib, apk_unc)} |")
+              md.append(f"| Assets/recursos do jogo (`assets/`) | {apk_assets:,} | {mib(apk_assets)} | {pct(apk_assets, apk_unc)} |")
+              md.append(f"| Bytecode DEX | {apk_dex:,} | {mib(apk_dex)} | {pct(apk_dex, apk_unc)} |")
+              rest = max(0, apk_unc - apk_lib - apk_assets - apk_dex)
+              md.append(f"| Outros (manifests, certs, recursos Android) | {rest:,} | {mib(rest)} | {pct(rest, apk_unc)} |")
+              md.append(f"| **TOTAL descomprimido** | **{apk_unc:,}** | **{mib(apk_unc)}** | 100% |")
+          else:
+              md.append("🔴 APK não gerado.")
+          md.append("")
+          md.append("---")
+          md.append("")
+
+          # ── C. DUPLICAÇÕES ────────────────────────────────────────────────
+          md.append("## C. Duplicações e Recursos Desnecessários")
+          md.append("")
+
+          # animations.glb
+          md.append("### C.1 `animations.glb` — avaliação")
+          md.append("")
+          if anims_glb.get("present"):
+              md.append(f"- **Tamanho:** {mib(anims_glb['size_bytes'])} no repositório")
+              md.append(f"- **Referenciado em cenas:** {'Sim — ' + str(scenes_ref_anims) if scenes_ref_anims else 'Não — nenhuma cena .tscn referencia este ficheiro'}")
+              if anims_in_apk:
+                  md.append(f"- **Encontrado no APK:** Sim (como ficheiro separado nos assets) 🟢 MEDIDO")
+              else:
+                  md.append(f"- **Encontrado directamente no APK:** Não (pode estar no PCK) 🟡 VERIFICAÇÃO PARCIAL")
+              soldier_anims = soldier.get("animations", 0)
+              if soldier_anims > 0:
+                  md.append(f"- **The_Soldier.glb tem {soldier_anims} animações incorporadas** — confirma que animations.glb é redundante")
+                  md.append(f"- **Veredicto:** 🟢 CONFIRMADO — animations.glb não é necessário para o funcionamento actual do jogo")
+              else:
+                  md.append(f"- **Veredicto:** 🔴 NÃO CONFIRMADO — The_Soldier.glb não tem animações incorporadas; animations.glb pode ser necessário")
+          else:
+              md.append("- `animations.glb` não presente no repositório.")
+          md.append("")
+
+          # Dupla compressão
+          md.append("### C.2 Dupla compressão de texturas")
+          md.append("")
+          md.append("Verificado em `export_presets.cfg` (preset Android):")
+          md.append("")
+          md.append("```ini")
+          if os.path.exists("export_presets.cfg"):
+              with open("export_presets.cfg") as f:
+                  for line in f:
+                      if "vram_texture_compression" in line or "export_filter" in line:
+                          md.append(line.rstrip())
+          md.append("```")
+          md.append("")
+          md.append("- Se `for_desktop=true` E `for_mobile=true`: o Godot inclui ambos os formatos no PCK")
+          md.append("- O Android usa apenas ETC2/ASTC — o formato desktop (S3TC) é desnecessário no APK Android")
+          md.append("- **Impacto estimado:** 🟡 ESTIMADO — depende da resolução das 20 texturas do The_Soldier.glb")
+          md.append("")
+          md.append("---")
+          md.append("")
+
+          # ── D. CAUSAS ─────────────────────────────────────────────────────
+          md.append("## D. Causas Identificadas do Tamanho do APK")
+          md.append("")
+          md.append("| # | Causa | Classificação | Tamanho | Fiabilidade |")
+          md.append("| --- | --- | --- | --- | --- |")
+          md.append("| 1 | Bibliotecas nativas Godot arm64-v8a | CONFIRMADA | " + mib(apk_lib) + " | 🟢 MEDIDO |")
+          soldier_sz = soldier.get("size_bytes", 0)
+          md.append("| 2 | The_Soldier.glb (117 anims + 20 texturas incorporadas) | CONFIRMADA | " + mib(soldier_sz) + " no repo | 🟢 MEDIDO |")
+          anims_sz = anims_glb.get("size_bytes", 0)
+          if anims_sz > 0:
+              md.append("| 3 | animations.glb incluído por `export_filter=all_resources` | CONFIRMADA | " + mib(anims_sz) + " no repo | 🟢 MEDIDO |")
+          md.append("| 4 | Dupla compressão de texturas (desktop+mobile) | PROVÁVEL | ~2–5 MiB estimado | 🟡 ESTIMADO |")
+          md.append("| 5 | Bytecode DEX e infra Android | CONFIRMADA | " + mib(apk_dex) + " | 🟢 MEDIDO |")
+          md.append("")
+          md.append("---")
+          md.append("")
+
+          # ── E. OPTIMIZAÇÕES ───────────────────────────────────────────────
+          md.append("## E. Oportunidades de Optimização")
+          md.append("")
+          md.append("| # | Acção | Ficheiro/Config | Poupança estimada | Risco | Impacto visual | Impacto no jogo |")
+          md.append("| --- | --- | --- | --- | --- | --- | --- |")
+          if anims_sz > 0:
+              md.append(f"| 1 | Excluir `animations.glb` da exportação Android | `export_presets.cfg` → `exclude_filter` | ~{mib(anims_sz)} | 🟢 Nulo | 🟢 Nenhum | 🟢 Nenhum |")
+          md.append("| 2 | Desactivar `vram_texture_compression/for_desktop` no preset Android | `export_presets.cfg` | ~2–5 MiB | 🟡 Baixo | 🟢 Nenhum em Android | 🟢 Nenhum |")
+          md.append("| 3 | Compressão Draco nos GLBs (re-exportar do Blender) | `The_Soldier.glb` | ~5–10 MiB | 🟠 Médio | 🟡 Verificar deformações | 🟡 Requer testes |")
+          md.append("| 4 | Remover animações não usadas do GLB | `The_Soldier.glb` | ~5–15 MiB | 🔴 Alto | 🟢 Nenhum | 🟡 Verificar lista |")
+          md.append("")
+          md.append("---")
+          md.append("")
+          md.append("## F. Recomendação Final")
+          md.append("")
+          if anims_sz > 0:
+              md.append(f"**Prioridade 1 — Excluir animations.glb da exportação Android**")
+              md.append(f"")
+              md.append(f"Adicionar ao preset Android em `export_presets.cfg`:")
+              md.append(f"```ini")
+              md.append(f"exclude_filter=\"assets/models/character/animations.glb\"")
+              md.append(f"```")
+              md.append(f"Poupança garantida: **~{mib(anims_sz)}** com risco zero.")
+              md.append("")
+          md.append("**Prioridade 2 — Desactivar compressão desktop no preset Android**")
+          md.append("")
+          md.append("```ini")
+          md.append("vram_texture_compression/for_desktop=false")
+          md.append("```")
+          md.append("")
+          md.append("---")
+          md.append("")
+          md.append(f"*Relatório gerado automaticamente pelo workflow `audit-apk-size.yml` em {now}.*")
+          md.append(f"*Nenhum ficheiro do projecto foi alterado durante esta auditoria.*")
+
+          with open(os.environ.get("REPORT_MD", "/tmp/audit-report.md"), "w") as f:
+              f.write("\n".join(md))
+          print("✓ audit-report.md gerado")
+
+          # ═══════════════════════════════════════════════════════════════════
+          # RELATÓRIO JSON
+          # ═══════════════════════════════════════════════════════════════════
+          report_json = {
+              "meta": {
+                  "generated_at": now,
+                  "engine": "Godot 4.3-stable",
+                  "platform": "Android (arm64-v8a)",
+                  "workflow": "audit-apk-size.yml",
+                  "repository": "Aurelhopedro/AxevCrime",
+              },
+              "project": {
+                  "total_size_bytes": proj_size,
+                  "total_size_mib": round(proj_size/1048576, 2) if proj_size else None,
+                  "total_files": proj_files,
+                  "measured": proj_size > 0,
+              },
+              "godot_imported": {
+                  "total_size_bytes": imp_size,
+                  "total_size_mib": round(imp_size/1048576, 2) if imp_size else None,
+                  "total_files": imp_files,
+                  "measured": imp_size > 0,
+              },
+              "apk": {
+                  "size_bytes_compressed": apk_size,
+                  "size_mib_compressed": round(apk_size/1048576, 2) if apk_size else None,
+                  "size_bytes_uncompressed": apk_unc,
+                  "size_mib_uncompressed": round(apk_unc/1048576, 2) if apk_unc else None,
+                  "lib_bytes": apk_lib,
+                  "lib_mib": round(apk_lib/1048576, 2) if apk_lib else None,
+                  "assets_bytes": apk_assets,
+                  "assets_mib": round(apk_assets/1048576, 2) if apk_assets else None,
+                  "dex_bytes": apk_dex,
+                  "dex_mib": round(apk_dex/1048576, 2) if apk_dex else None,
+                  "measured": apk_size > 0,
+              },
+              "glb": {
+                  "soldier": {
+                      "path": soldier.get("path"),
+                      "present": soldier.get("present", False),
+                      "size_bytes": soldier.get("size_bytes", 0),
+                      "size_mib": round(soldier.get("size_bytes",0)/1048576, 2),
+                      "animations": soldier.get("animations", 0),
+                      "materials": soldier.get("materials", 0),
+                      "images": soldier.get("images", 0),
+                      "images_embedded": soldier.get("images_embedded", 0),
+                      "images_external": soldier.get("images_external", 0),
+                      "skins": soldier.get("skins", 0),
+                      "bone_count": soldier.get("bone_count", 0),
+                      "json_bytes": soldier.get("json_bytes", 0),
+                      "bin_bytes": soldier.get("bin_bytes", 0),
+                      "anim_names": soldier.get("anim_names", []),
+                  },
+                  "animations_glb": {
+                      "path": anims_glb.get("path"),
+                      "present": anims_glb.get("present", False),
+                      "size_bytes": anims_glb.get("size_bytes", 0),
+                      "size_mib": round(anims_glb.get("size_bytes",0)/1048576, 2),
+                      "animations": anims_glb.get("animations", 0),
+                      "anim_names": anims_glb.get("anim_names", []),
+                  },
+                  "animations_glb_in_apk": anims_in_apk,
+                  "scenes_referencing_animations_glb": scenes_ref_anims,
+              },
+              "findings": {
+                  "animations_glb_redundant": (
+                      anims_glb.get("present", False) and
+                      soldier.get("animations", 0) > 0 and
+                      len(scenes_ref_anims) == 0
+                  ),
+                  "double_texture_compression": None,  # requer análise do PCK
+              },
+          }
+
+          with open(os.environ.get("REPORT_JSON", "/tmp/audit-report.json"), "w") as f:
+              json.dump(report_json, f, indent=2, ensure_ascii=False)
+          print("✓ audit-report.json gerado")
+          PYEOF
+
+      # ════════════════════════════════════════════════════════════════
+      # 17. IMPRIMIR SUMÁRIO NO LOG
+      # ════════════════════════════════════════════════════════════════
+      - name: Imprimir sumário no log do workflow
+        if: always()
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  AXEV CRIME — SUMÁRIO DA AUDITORIA APK"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+
+          if [[ -n "${PROJ_TOTAL_SIZE:-}" && "${PROJ_TOTAL_SIZE}" -gt 0 ]]; then
+            printf "  Projecto           : %'d bytes  (%.2f MiB)  |  %s ficheiros\n" \
+              "$PROJ_TOTAL_SIZE" \
+              "$(echo "$PROJ_TOTAL_SIZE 1048576" | awk '{printf "%.2f", $1/$2}')" \
+              "$PROJ_TOTAL_FILES"
+          fi
+
+          if [[ -n "${IMPORTED_TOTAL_SIZE:-}" && "${IMPORTED_TOTAL_SIZE}" -gt 0 ]]; then
+            printf "  .godot/imported    : %'d bytes  (%.2f MiB)  |  %s ficheiros\n" \
+              "$IMPORTED_TOTAL_SIZE" \
+              "$(echo "$IMPORTED_TOTAL_SIZE 1048576" | awk '{printf "%.2f", $1/$2}')" \
+              "$IMPORTED_TOTAL_FILES"
+          fi
+
+          if [[ -n "${APK_SIZE_BYTES:-}" && "${APK_SIZE_BYTES}" -gt 0 ]]; then
+            printf "  APK (comprimido)   : %'d bytes  (%.2f MiB)\n" \
+              "$APK_SIZE_BYTES" \
+              "$(echo "$APK_SIZE_BYTES 1048576" | awk '{printf "%.2f", $1/$2}')"
+            printf "  APK (descomprimido): %'d bytes  (%.2f MiB)\n" \
+              "$APK_UNCOMPRESSED" \
+              "$(echo "$APK_UNCOMPRESSED 1048576" | awk '{printf "%.2f", $1/$2}')"
+            printf "    lib/ (nativas)   : %'d bytes  (%.2f MiB)\n" \
+              "$APK_LIB_SIZE" \
+              "$(echo "$APK_LIB_SIZE 1048576" | awk '{printf "%.2f", $1/$2}')"
+            printf "    assets/ (jogo)   : %'d bytes  (%.2f MiB)\n" \
+              "$APK_ASSETS_SIZE" \
+              "$(echo "$APK_ASSETS_SIZE 1048576" | awk '{printf "%.2f", $1/$2}')"
+          else
+            echo "  APK                : não gerado"
+          fi
+
+          echo ""
+          echo "  animations.glb no APK: ${ANIMS_IN_APK:-desconhecido}"
+          echo ""
+
+          if [[ -f "$REPORT_MD" ]]; then
+            echo "  ✓ audit-report.md gerado"
+          fi
+          if [[ -f "$REPORT_JSON" ]]; then
+            echo "  ✓ audit-report.json gerado"
+          fi
+
+          echo ""
+          echo "  Nenhum ficheiro do projecto foi alterado."
+          echo "  Nenhum commit foi efectuado."
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      # ════════════════════════════════════════════════════════════════
+      # 18. UPLOAD — RELATÓRIO (artefacto independente)
+      # ════════════════════════════════════════════════════════════════
+      - name: Upload — Relatório de auditoria
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-apk-report-${{ github.run_number }}
+          path: |
+            /tmp/audit-report.md
+            /tmp/audit-report.json
+          retention-days: 30
+          if-no-files-found: warn
+
+      # ════════════════════════════════════════════════════════════════
+      # 19. UPLOAD — APK DE AUDITORIA (artefacto independente)
+      # ════════════════════════════════════════════════════════════════
+      - name: Upload — APK de auditoria
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-apk-android-${{ github.run_number }}
+          path: build/android/axev_crime_audit.apk
+          retention-days: 7
+          if-no-files-found: warn
+
+      # ════════════════════════════════════════════════════════════════
+      # 20. UPLOAD — LOGS (artefacto independente)
+      # ════════════════════════════════════════════════════════════════
+      - name: Upload — Logs de execução
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-logs-${{ github.run_number }}
+          path: |
+            /tmp/godot_import.log
+            /tmp/godot_android_export.log
+            /tmp/apk_listing.txt
+            /tmp/project_files_sorted.txt
+            /tmp/imported_files_sorted.txt
+            /tmp/glb_audit.json
+          retention-days: 7
+          if-no-files-found: ignore

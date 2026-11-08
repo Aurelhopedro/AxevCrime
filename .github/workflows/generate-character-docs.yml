@@ -1,0 +1,942 @@
+name: Generate Character Documentation
+
+# ============================================================================
+# AXEV CRIME — Documentação Completa do Personagem The_Soldier.glb
+# ============================================================================
+#
+# Produz dois ficheiros de texto com base nos dados REAIS do GLB:
+#
+#   SOLDIER_REFERENCE.md
+#     Referência técnica completa: skeleton, animações (nomes exactos),
+#     integração com Godot 4.3, como cada animação é activada,
+#     parâmetros do controlador, fluxo de estados.
+#
+#   SOLDIER_MODIFICATION_GUIDE.md
+#     Guia de modificação: como editar no Blender, como re-exportar,
+#     como adicionar animações, como alterar materiais/texturas,
+#     dicas de workflow para Mixamo, Blender e Godot.
+#
+# COMO USAR: GitHub Actions → "Generate Character Documentation" → Run workflow
+#
+# Os ficheiros são publicados como GitHub Artifact (download disponível
+# no separador Actions após conclusão) e opcionalmente committed ao repo.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_docs:
+        description: "Fazer commit dos ficheiros gerados ao repositório?"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: write
+
+jobs:
+  generate-docs:
+    name: Gerar documentação do personagem
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    env:
+      GLB_PATH: "assets/models/character/protagonist/The_Soldier.glb"
+      OUT_REF:  "SOLDIER_REFERENCE.md"
+      OUT_MOD:  "SOLDIER_MODIFICATION_GUIDE.md"
+
+    steps:
+      # ── 1. CHECKOUT ────────────────────────────────────────────────
+      - name: Checkout repositório
+        uses: actions/checkout@v4
+
+      # ── 2. VERIFICAR GLB ───────────────────────────────────────────
+      - name: Verificar existência do GLB
+        run: |
+          set -euo pipefail
+          if [[ ! -f "$GLB_PATH" ]]; then
+            echo "::error::Ficheiro não encontrado: $GLB_PATH"
+            ls -la assets/models/character/protagonist/ || echo "(directório vazio)"
+            exit 1
+          fi
+          HEX=$(xxd -l 4 -p "$GLB_PATH")
+          if [[ "$HEX" != "676c5446" ]]; then
+            echo "::error::Magic bytes inválidos — não é um GLB válido: $HEX"
+            exit 1
+          fi
+          echo "✓ GLB válido: $(du -sh "$GLB_PATH" | cut -f1)"
+
+      # ── 3. INSTALAR PYTHON ─────────────────────────────────────────
+      - name: Instalar dependências
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends python3 python3-pip xxd
+          pip3 install --quiet pygltflib
+
+      # ── 4. EXTRAIR DADOS DO GLB ────────────────────────────────────
+      - name: Extrair dados reais do GLB
+        run: |
+          python3 << 'PYEOF' > /tmp/glb_data.json
+          import struct, json, sys
+
+          GLB_PATH = "assets/models/character/protagonist/The_Soldier.glb"
+
+          with open(GLB_PATH, "rb") as f:
+              raw = f.read()
+
+          magic, version, glb_length = struct.unpack_from("<III", raw, 0)
+          chunk0_len = struct.unpack_from("<I", raw, 12)[0]
+          gltf = json.loads(raw[20:20 + chunk0_len])
+
+          nodes      = gltf.get("nodes", [])
+          skins      = gltf.get("skins", [])
+          animations = gltf.get("animations", [])
+          materials  = gltf.get("materials", [])
+          images     = gltf.get("images", [])
+          meshes     = gltf.get("meshes", [])
+          accessors  = gltf.get("accessors", [])
+
+          # Bounding box
+          min_xyz = [float("inf")] * 3
+          max_xyz = [float("-inf")] * 3
+          for acc in accessors:
+              if acc.get("type") == "VEC3" and "min" in acc and "max" in acc:
+                  for axis in range(3):
+                      if acc["min"][axis] < min_xyz[axis]: min_xyz[axis] = acc["min"][axis]
+                      if acc["max"][axis] > max_xyz[axis]: max_xyz[axis] = acc["max"][axis]
+
+          bbox = None
+          if all(v != float("inf") for v in min_xyz):
+              bbox = {
+                  "min": min_xyz, "max": max_xyz,
+                  "width":  round(max_xyz[0] - min_xyz[0], 4),
+                  "height": round(max_xyz[1] - min_xyz[1], 4),
+                  "depth":  round(max_xyz[2] - min_xyz[2], 4),
+              }
+
+          # Skeleton — nomes dos bones
+          skeleton_data = []
+          if skins:
+              skin = skins[0]
+              joints = skin.get("joints", [])
+              for j_idx, node_idx in enumerate(joints):
+                  node = nodes[node_idx] if node_idx < len(nodes) else {}
+                  bone_name = node.get("name", f"bone_{j_idx}")
+                  children_indices = node.get("children", [])
+                  # resolver nomes dos filhos
+                  children_names = []
+                  for ci in children_indices:
+                      if ci in joints:
+                          cn = nodes[ci].get("name", f"node_{ci}") if ci < len(nodes) else f"node_{ci}"
+                          children_names.append(cn)
+                  skeleton_data.append({
+                      "index": j_idx,
+                      "name": bone_name,
+                      "node_index": node_idx,
+                      "children": children_names
+                  })
+
+          # Animações — nomes e contagem de canais/samplers
+          anim_data = []
+          for i, anim in enumerate(animations):
+              channels = anim.get("channels", [])
+              samplers = anim.get("samplers", [])
+              # Detectar quais bones têm keyframes nesta animação
+              bones_used = set()
+              for ch in channels:
+                  tgt = ch.get("target", {})
+                  node_idx = tgt.get("node")
+                  if node_idx is not None and node_idx < len(nodes):
+                      bname = nodes[node_idx].get("name", f"node_{node_idx}")
+                      bones_used.add(bname)
+              # Estimar duração via samplers (input accessor max)
+              duration = 0.0
+              for s in samplers:
+                  inp = s.get("input")
+                  if inp is not None and inp < len(accessors):
+                      acc = accessors[inp]
+                      if "max" in acc:
+                          d = acc["max"][0] if isinstance(acc["max"], list) else acc["max"]
+                          if d > duration:
+                              duration = d
+              anim_data.append({
+                  "index": i,
+                  "name": anim.get("name", f"anim_{i}"),
+                  "channels": len(channels),
+                  "samplers": len(samplers),
+                  "duration_s": round(duration, 3),
+                  "bones_used": sorted(list(bones_used)),
+              })
+
+          # Materiais
+          mat_data = []
+          for i, mat in enumerate(materials):
+              pbr = mat.get("pbrMetallicRoughness", {})
+              mat_data.append({
+                  "index": i,
+                  "name": mat.get("name", f"mat_{i}"),
+                  "base_color_texture": "baseColorTexture" in pbr,
+                  "metallic_roughness_texture": "metallicRoughnessTexture" in pbr,
+                  "normal_texture": "normalTexture" in mat,
+                  "alpha_mode": mat.get("alphaMode", "OPAQUE"),
+                  "double_sided": mat.get("doubleSided", False),
+              })
+
+          # Imagens
+          img_data = []
+          for i, img in enumerate(images):
+              img_data.append({
+                  "index": i,
+                  "name": img.get("name", f"img_{i}"),
+                  "mimeType": img.get("mimeType", "?"),
+                  "embedded": "bufferView" in img,
+              })
+
+          # Meshes
+          mesh_data = []
+          for i, mesh in enumerate(meshes):
+              prims = mesh.get("primitives", [])
+              mesh_data.append({
+                  "index": i,
+                  "name": mesh.get("name", f"mesh_{i}"),
+                  "primitives": len(prims),
+              })
+
+          output = {
+              "file": GLB_PATH,
+              "glb_size_bytes": glb_length,
+              "glb_version": version,
+              "node_count": len(nodes),
+              "mesh_count": len(meshes),
+              "meshes": mesh_data,
+              "skin_count": len(skins),
+              "skin_name": skins[0].get("name", "Armature") if skins else None,
+              "bone_count": len(skeleton_data),
+              "skeleton": skeleton_data,
+              "animation_count": len(animations),
+              "animations": anim_data,
+              "material_count": len(materials),
+              "materials": mat_data,
+              "image_count": len(images),
+              "images": img_data,
+              "bounding_box": bbox,
+          }
+
+          print(json.dumps(output, indent=2, ensure_ascii=False))
+          PYEOF
+
+          echo "✓ Dados extraídos: $(python3 -c "import json; d=json.load(open('/tmp/glb_data.json')); print(f\"{d['animation_count']} animações, {d['bone_count']} bones, {d['material_count']} materiais\")")"
+
+      # ── 5. GERAR SOLDIER_REFERENCE.md ─────────────────────────────
+      - name: Gerar SOLDIER_REFERENCE.md
+        run: |
+          python3 << 'PYEOF'
+          import json
+          from datetime import datetime
+
+          d = json.load(open("/tmp/glb_data.json"))
+          bbox = d.get("bounding_box") or {}
+          now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+          # Detectar prefixo dos bones (Mixamo, Blender, etc.)
+          bone_names = [b["name"] for b in d["skeleton"]]
+          if any("mixamorig:" in b for b in bone_names):
+              prefix_note = "Prefixo **`mixamorig:`** — origem Mixamo/Blender."
+          elif any("Armature" in b for b in bone_names):
+              prefix_note = "Prefixo **`Armature`** — exportação via Blender."
+          else:
+              prefix_note = "Sem prefixo de pipeline detectado."
+
+          # Classificar animações por categoria (heurística de nome)
+          categories = {
+              "Locomoção": [],
+              "Salto / Ar": [],
+              "Combate": [],
+              "Reacção / Dano": [],
+              "Morte / Queda": [],
+              "Interacção": [],
+              "Outras / Poses": [],
+          }
+          loco_kw   = ["idle","walk","run","sprint","jog","strafe","back","crouch","sneak","swim"]
+          jump_kw   = ["jump","fall","land","leap","air","float","hang"]
+          combat_kw = ["attack","punch","kick","slash","shoot","fire","throw","stab","swing","block","dodge","evade","parry"]
+          react_kw  = ["hit","react","stagger","pain","hurt","impact","reel","stumble","flinch"]
+          death_kw  = ["die","death","dead","collapse","fall_down","ragdoll","KO","knockout"]
+          inter_kw  = ["pick","grab","use","open","push","pull","climb","sit","wave","point","emote","taunt","drink","eat"]
+
+          def classify(name):
+              nl = name.lower()
+              for kw in death_kw:
+                  if kw in nl: return "Morte / Queda"
+              for kw in react_kw:
+                  if kw in nl: return "Reacção / Dano"
+              for kw in combat_kw:
+                  if kw in nl: return "Combate"
+              for kw in jump_kw:
+                  if kw in nl: return "Salto / Ar"
+              for kw in loco_kw:
+                  if kw in nl: return "Locomoção"
+              for kw in inter_kw:
+                  if kw in nl: return "Interacção"
+              return "Outras / Poses"
+
+          for anim in d["animations"]:
+              cat = classify(anim["name"])
+              categories[cat].append(anim)
+
+          # Mapeamento semântico (igual ao ANIM_CANDIDATES do controlador)
+          candidates = {
+              "Idle":  ["Idle","idle","IDLE","Armature|Idle","Standing Idle","Breathing Idle","mixamo.com","T-Pose"],
+              "Walk":  ["Walk","walk","Walking","Armature|Walk","Walk Forward","Walk_Forward","Walk In Place"],
+              "Run":   ["Run","run","Running","Sprint","sprint","Jog","jog","Armature|Run","Run Forward","Run In Place"],
+              "Jump":  ["Jump","jump","Jumping","Jump Up","Armature|Jump","Jump In Place","Fall","Leap"],
+          }
+          resolved = {}
+          for semantic, cands in candidates.items():
+              found = next((c for c in cands if c in bone_names or c in [a["name"] for a in d["animations"]]), None)
+              anim_names = [a["name"] for a in d["animations"]]
+              found = next((c for c in cands if c in anim_names), None)
+              if not found:
+                  found = next((a for a in anim_names if semantic.lower() in a.lower()), None)
+              resolved[semantic] = found or "(não encontrado)"
+
+          lines = []
+          lines.append(f"# The_Soldier — Referência Técnica Completa")
+          lines.append(f"")
+          lines.append(f"> Gerado automaticamente em {now}  ")
+          lines.append(f"> Fonte: `{d['file']}`  ")
+          lines.append(f"> Repositório: `Aurelhopedro/AxevCrime`")
+          lines.append(f"")
+          lines.append(f"---")
+          lines.append(f"")
+          lines.append(f"## Sumário")
+          lines.append(f"")
+          lines.append(f"| Campo | Valor |")
+          lines.append(f"| --- | --- |")
+          lines.append(f"| Ficheiro | `{d['file']}` |")
+          lines.append(f"| Tamanho | {d['glb_size_bytes']:,} bytes ({d['glb_size_bytes']/1024/1024:.2f} MB) |")
+          lines.append(f"| Formato | GLB (Binary glTF v{d['glb_version']}) |")
+          lines.append(f"| Nós na cena | {d['node_count']} |")
+          lines.append(f"| Meshes | {d['mesh_count']} |")
+          lines.append(f"| Skeleton (skins) | {d['skin_count']} — `{d['skin_name']}` |")
+          lines.append(f"| Bones | {d['bone_count']} |")
+          lines.append(f"| Animações | {d['animation_count']} |")
+          lines.append(f"| Materiais | {d['material_count']} |")
+          lines.append(f"| Texturas (imagens) | {d['image_count']} |")
+          if bbox:
+              lines.append(f"| Altura (Y) | {bbox['height']:.4f} unidades |")
+              lines.append(f"| Largura (X) | {bbox['width']:.4f} unidades |")
+              lines.append(f"| Profundidade (Z) | {bbox['depth']:.4f} unidades |")
+          lines.append(f"")
+          lines.append(f"---")
+          lines.append(f"")
+          lines.append(f"## 1. Dimensões e Escala no Godot")
+          lines.append(f"")
+          if bbox:
+              h = bbox["height"]
+              lines.append(f"O modelo tem **{h:.4f} unidades de altura** no seu eixo Y.")
+              if h < 0.1:
+                  scale = round(1.8 / h, 5)
+                  lines.append(f"")
+                  lines.append(f"⚠️ **Modelo muito pequeno** (provável unidade em centímetros).")
+                  lines.append(f"")
+                  lines.append(f"**Escala recomendada no Godot:** `Vector3({scale}, {scale}, {scale})`")
+                  lines.append(f"")
+                  lines.append(f"Aplicar em `scenes/player.tscn` no nó `CharacterMesh`:")
+                  lines.append(f"```")
+                  lines.append(f"[node name=\"CharacterMesh\" type=\"Node3D\" parent=\".\"]")
+                  lines.append(f"transform = Transform3D({scale}, 0, 0, 0, {scale}, 0, 0, 0, {scale}, 0, 0, 0)")
+                  lines.append(f"```")
+              elif h > 100:
+                  scale = round(1.8 / h, 6)
+                  lines.append(f"")
+                  lines.append(f"⚠️ **Modelo gigante** (provável unidade em centímetros).")
+                  lines.append(f"")
+                  lines.append(f"**Escala recomendada:** `Vector3({scale}, {scale}, {scale})`")
+              elif 1.5 <= h <= 2.5:
+                  lines.append(f"")
+                  lines.append(f"✅ **Escala adequada para Godot** (altura ≈ {h:.2f}m).")
+                  lines.append(f"Usar `scale = Vector3(1, 1, 1)` — sem ajuste necessário.")
+              else:
+                  scale = round(1.8 / h, 5)
+                  lines.append(f"")
+                  lines.append(f"**Escala sugerida para altura 1.8m:** `Vector3({scale}, {scale}, {scale})`")
+              lines.append(f"")
+              foot_y = bbox["min"][1]
+              origin_y = round(-0.9 - foot_y, 4)
+              lines.append(f"**Posicionamento do nó CharacterMesh:**  ")
+              lines.append(f"O pé do modelo está em Y = {foot_y:.4f}.  ")
+              lines.append(f"Para centrar na cápsula de colisão (height=1.8m): `position.y = {origin_y}`")
+          lines.append(f"")
+          lines.append(f"---")
+          lines.append(f"")
+          lines.append(f"## 2. Skeleton — Estrutura de Bones")
+          lines.append(f"")
+          lines.append(f"{prefix_note}  ")
+          lines.append(f"Total: **{d['bone_count']} bones** no skin `{d['skin_name']}`.")
+          lines.append(f"")
+          lines.append(f"### Lista completa de bones (ordem do skin)")
+          lines.append(f"")
+          lines.append(f"| # | Nome do bone | Filhos directos |")
+          lines.append(f"| --- | --- | --- |")
+          for b in d["skeleton"]:
+              children_str = ", ".join(b["children"]) if b["children"] else "—"
+              lines.append(f"| {b['index']} | `{b['name']}` | {children_str} |")
+          lines.append(f"")
+          lines.append(f"### Como usar bones no GDScript")
+          lines.append(f"")
+          lines.append(f"```gdscript")
+          lines.append(f"# Obter referência ao Skeleton3D")
+          lines.append(f"var skel: Skeleton3D = $CharacterMesh/The_Soldier/Armature/Skeleton3D")
+          lines.append(f"")
+          lines.append(f"# Número de bones")
+          lines.append(f"print(skel.get_bone_count())  # → {d['bone_count']}")
+          lines.append(f"")
+          lines.append(f"# Listar nomes de todos os bones")
+          lines.append(f"for i in skel.get_bone_count():")
+          lines.append(f"    print(skel.get_bone_name(i))")
+          lines.append(f"")
+          if bone_names:
+              first_bone = bone_names[0]
+              lines.append(f"# Obter índice de um bone pelo nome")
+              lines.append(f"var hip_idx: int = skel.find_bone(\"{first_bone}\")")
+          lines.append(f"")
+          lines.append(f"# Ler a pose actual de um bone")
+          lines.append(f"var pose: Transform3D = skel.get_bone_global_pose(hip_idx)")
+          lines.append(f"```")
+          lines.append(f"")
+          lines.append(f"---")
+          lines.append(f"")
+          lines.append(f"## 3. Animações — Catálogo Completo ({d['animation_count']} animações)")
+          lines.append(f"")
+          lines.append(f"### 3.1 Mapeamento semântico (usado pelo player_controller.gd)")
+          lines.append(f"")
+          lines.append(f"O controlador usa 4 estados semânticos mapeados para os nomes reais do GLB:")
+          lines.append(f"")
+          lines.append(f"| Estado semântico | Nome real no GLB | Como é activado |")
+          lines.append(f"| --- | --- | --- |")
+          for semantic, real in resolved.items():
+              activations = {
+                  "Idle": "`velocity` horizontal < 0.3 m/s E no chão",
+                  "Walk": "`velocity` horizontal ≥ 0.3 m/s E no chão E sem `run` premido",
+                  "Run":  "`velocity` horizontal ≥ 0.3 m/s E no chão E `run` premido",
+                  "Jump": "No ar (não `is_on_floor()`) OU recém-aterrado (land_timer > 0)",
+              }
+              lines.append(f"| **{semantic}** | `{real}` | {activations.get(semantic, '—')} |")
+          lines.append(f"")
+          lines.append(f"### 3.2 Como adicionar novos estados ao controlador")
+          lines.append(f"")
+          lines.append(f"```gdscript")
+          lines.append(f"# Em player_controller.gd — adicionar à ANIM_CANDIDATES:")
+          lines.append(f"const ANIM_CANDIDATES : Dictionary = {{")
+          lines.append(f"    # ... estados existentes ...")
+          lines.append(f"    \"Crouch\": [\"Crouch\", \"crouch\", \"Crouching\", \"Duck\"],")
+          lines.append(f"    \"Attack\": [\"Attack\", \"attack\", \"Punch\", \"Slash\"],")
+          lines.append(f"}}")
+          lines.append(f"")
+          lines.append(f"# Em _update_animation(), adicionar condição:")
+          lines.append(f"if Input.is_action_just_pressed(\"attack\"):")
+          lines.append(f"    _play_anim(\"Attack\")")
+          lines.append(f"```")
+          lines.append(f"")
+          lines.append(f"### 3.3 Lista completa por categoria")
+          lines.append(f"")
+          for cat, anims in categories.items():
+              if not anims:
+                  continue
+              lines.append(f"#### {cat} ({len(anims)} animações)")
+              lines.append(f"")
+              lines.append(f"| # | Nome exacto no GLB | Duração | Canais | Bones envolvidos |")
+              lines.append(f"| --- | --- | --- | --- | --- |")
+              for a in sorted(anims, key=lambda x: x["name"].lower()):
+                  dur = f"{a['duration_s']:.2f}s" if a['duration_s'] > 0 else "?"
+                  bones_preview = ", ".join(a["bones_used"][:4])
+                  if len(a["bones_used"]) > 4:
+                      bones_preview += f" (+{len(a['bones_used'])-4})"
+                  lines.append(f"| {a['index']} | `{a['name']}` | {dur} | {a['channels']} | {bones_preview or '—'} |")
+              lines.append(f"")
+          lines.append(f"### 3.4 Como tocar qualquer animação directamente")
+          lines.append(f"")
+          lines.append(f"```gdscript")
+          lines.append(f"# Referência directa ao AnimationPlayer (sem mapeamento semântico)")
+          lines.append(f"var ap: AnimationPlayer = _anim_player  # já resolvido pelo controlador")
+          lines.append(f"")
+          lines.append(f"# Tocar pelo nome exacto do GLB")
+          if d["animations"]:
+              ex = d["animations"][0]["name"]
+              lines.append(f"ap.play(\"{ex}\")")
+          lines.append(f"")
+          lines.append(f"# Listar todas as animações disponíveis em runtime")
+          lines.append(f"for name in ap.get_animation_list():")
+          lines.append(f"    print(name)")
+          lines.append(f"")
+          lines.append(f"# Verificar se uma animação existe antes de a tocar")
+          lines.append(f"if ap.has_animation(\"Walk\"):")
+          lines.append(f"    ap.play(\"Walk\")")
+          lines.append(f"```")
+          lines.append(f"")
+          lines.append(f"---")
+          lines.append(f"")
+          lines.append(f"## 4. Materiais e Texturas")
+          lines.append(f"")
+          lines.append(f"| # | Nome | Textura base | MetalRough | Normal map | Alpha | Double sided |")
+          lines.append(f"| --- | --- | --- | --- | --- | --- | --- |")
+          for m in d["materials"]:
+              lines.append(f"| {m['index']} | `{m['name']}` | {'✓' if m['base_color_texture'] else '✗'} | {'✓' if m['metallic_roughness_texture'] else '✗'} | {'✓' if m['normal_texture'] else '✗'} | {m['alpha_mode']} | {'✓' if m['double_sided'] else '✗'} |")
+          lines.append(f"")
+          lines.append(f"**Imagens incorporadas no GLB:**")
+          lines.append(f"")
+          lines.append(f"| # | Nome | Tipo | Localização |")
+          lines.append(f"| --- | --- | --- | --- |")
+          for img in d["images"]:
+              loc = "Incorporada no BIN chunk" if img["embedded"] else "URI externa"
+              lines.append(f"| {img['index']} | `{img['name']}` | {img['mimeType']} | {loc} |")
+          lines.append(f"")
+          lines.append(f"---")
+          lines.append(f"")
+          lines.append(f"## 5. Integração com Godot 4.3 — Fluxo Completo")
+          lines.append(f"")
+          lines.append(f"### 5.1 Hierarquia de nós em player.tscn")
+          lines.append(f"")
+          lines.append(f"```")
+          lines.append(f"CharacterBody3D  [player_controller.gd]")
+          lines.append(f"├── CollisionShape3D    ← CapsuleShape3D (height=1.8, radius=0.3)")
+          lines.append(f"├── CameraPivot (Node3D) ← controlado pelo rato/touch")
+          lines.append(f"│   └── Camera3D")
+          lines.append(f"├── CharacterMesh (Node3D) ← contém The_Soldier.glb")
+          lines.append(f"│   └── The_Soldier (instância do GLB)")
+          lines.append(f"│       ├── AnimationPlayer  ← {d['animation_count']} animações")
+          lines.append(f"│       └── Skeleton3D       ← {d['bone_count']} bones")
+          lines.append(f"└── AnimationRoot (Node3D) ← reservado para animations.glb externo")
+          lines.append(f"```")
+          lines.append(f"")
+          lines.append(f"### 5.2 Fluxo de estados de animação")
+          lines.append(f"")
+          lines.append(f"```")
+          lines.append(f"[Qualquer estado]")
+          lines.append(f"       │")
+          lines.append(f"       ▼ is_on_floor() muda de true → false")
+          lines.append(f"    [Jump/Fall]  ←────────────────────────────────────┐")
+          lines.append(f"       │                                               │")
+          lines.append(f"       ▼ is_on_floor() = true (aterragem)             │")
+          lines.append(f"    [Land] (land_timer = 0.35s)                       │")
+          lines.append(f"       │                                               │")
+          lines.append(f"       ▼ land_timer ≤ 0                               │")
+          lines.append(f"       ├─ h_speed < 0.3 ──────────▶ [Idle]           │")
+          lines.append(f"       ├─ h_speed ≥ 0.3 + walk ───▶ [Walk]           │")
+          lines.append(f"       └─ h_speed ≥ 0.3 + run ────▶ [Run]            │")
+          lines.append(f"              │                                        │")
+          lines.append(f"              └────────── jump premido ───────────────┘")
+          lines.append(f"```")
+          lines.append(f"")
+          lines.append(f"### 5.3 Como o AnimationPlayer é encontrado")
+          lines.append(f"")
+          lines.append(f"O `player_controller.gd` usa `_find_ap_deep()` para procurar")
+          lines.append(f"recursivamente o `AnimationPlayer` dentro de `CharacterMesh`.")
+          lines.append(f"Funciona independentemente da profundidade da hierarquia do GLB.")
+          lines.append(f"")
+          lines.append(f"### 5.4 Root Motion — estado actual")
+          lines.append(f"")
+          lines.append(f"Root Motion está **desactivado** (`_anim_player.root_motion_track = \"\"`)")
+          lines.append(f"porque o movimento é totalmente controlado por `CharacterBody3D`.")
+          lines.append(f"As animações tocam visualmente mas não movem o nó.")
+          lines.append(f"")
+          lines.append(f"Para activar Root Motion no futuro:")
+          lines.append(f"```gdscript")
+          lines.append(f"# Definir a track de root motion (geralmente o bone raiz)")
+          if bone_names:
+              lines.append(f"_anim_player.root_motion_track = NodePath(\"{bone_names[0]}\")")
+          lines.append(f"")
+          lines.append(f"# Em _physics_process — aplicar o root motion ao CharacterBody3D")
+          lines.append(f"var rm: Vector3 = anim_tree.get_root_motion_position()")
+          lines.append(f"velocity = rm / delta")
+          lines.append(f"move_and_slide()")
+          lines.append(f"```")
+          lines.append(f"")
+          lines.append(f"---")
+          lines.append(f"")
+          lines.append(f"## 6. Notas de Compatibilidade")
+          lines.append(f"")
+          lines.append(f"| Aspecto | Estado |")
+          lines.append(f"| --- | --- |")
+          lines.append(f"| GLB v{d['glb_version']} → Godot 4.3 | ✅ Compatível |")
+          lines.append(f"| Skeleton rigged | {'✅ ' + str(d['bone_count']) + ' bones' if d['bone_count'] > 0 else '❌ sem skeleton'} |")
+          lines.append(f"| Animações incorporadas | {'✅ ' + str(d['animation_count']) if d['animation_count'] > 0 else '❌ nenhuma'} |")
+          lines.append(f"| Texturas no GLB | {'✅ ' + str(d['image_count']) + ' imagem(ns)' if d['image_count'] > 0 else '⚠️ sem texturas'} |")
+          lines.append(f"| Root Motion | ⚠️ Desactivado (controlado por código) |")
+          lines.append(f"| Android Export | ✅ testado (player_controller.gd v3.1) |")
+
+          with open("/tmp/SOLDIER_REFERENCE.md", "w", encoding="utf-8") as f:
+              f.write("\n".join(lines))
+
+          print(f"✓ SOLDIER_REFERENCE.md gerado ({len(lines)} linhas)")
+          PYEOF
+
+      # ── 6. GERAR SOLDIER_MODIFICATION_GUIDE.md ────────────────────
+      - name: Gerar SOLDIER_MODIFICATION_GUIDE.md
+        run: |
+          python3 << 'PYEOF'
+          import json
+          from datetime import datetime
+
+          d = json.load(open("/tmp/glb_data.json"))
+          now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+          bone_names = [b["name"] for b in d["skeleton"]]
+          anim_names = [a["name"] for a in d["animations"]]
+
+          # Detectar pipeline de origem
+          if any("mixamorig:" in b for b in bone_names):
+              origin = "Mixamo (via Adobe Mixamo + Blender)"
+              origin_url = "https://www.mixamo.com"
+              blender_note = "O modelo foi provavelmente exportado do Mixamo e retrabalhado no Blender. Os bones têm prefixo `mixamorig:`."
+          elif any("Armature" in b for b in bone_names):
+              origin = "Blender (exportação directa)"
+              origin_url = "https://www.blender.org"
+              blender_note = "O modelo foi exportado directamente do Blender. Os bones pertencem ao Armature padrão do Blender."
+          else:
+              origin = "Pipeline desconhecido / personalizado"
+              origin_url = ""
+              blender_note = "A origem do pipeline não foi detectada pelos nomes dos bones."
+
+          lines = []
+          lines.append(f"# The_Soldier — Guia de Modificação")
+          lines.append(f"")
+          lines.append(f"> Gerado automaticamente em {now}  ")
+          lines.append(f"> Fonte: `{d['file']}`  ")
+          lines.append(f"> Pipeline detectado: **{origin}**")
+          lines.append(f"")
+          lines.append(f"---")
+          lines.append(f"")
+          lines.append(f"## Sobre este guia")
+          lines.append(f"")
+          lines.append(f"Este documento explica como modificar o personagem **The_Soldier** fora do Godot —")
+          lines.append(f"no Blender, no Mixamo ou noutras ferramentas — e como reintegrar as alterações")
+          lines.append(f"no projecto **AXEV CRIME** sem quebrar o que já está a funcionar.")
+          lines.append(f"")
+          lines.append(f"---")
+          lines.append(f"")
+          lines.append(f"## 1. Origem do modelo")
+          lines.append(f"")
+          lines.append(f"**Pipeline detectado:** {origin}")
+          if origin_url:
+              lines.append(f"**Referência:** {origin_url}")
+          lines.append(f"")
+          lines.append(f"{blender_note}")
+          lines.append(f"")
+          lines.append(f"**O que isto significa na prática:**")
+          lines.append(f"")
+          if "mixamorig:" in " ".join(bone_names):
+              lines.append(f"- Os nomes dos bones em GDScript têm o prefixo `mixamorig:` — por exemplo `mixamorig:Hips`.")
+              lines.append(f"- As animações do Mixamo podem ser aplicadas directamente sem re-rigging.")
+              lines.append(f"- Para adicionar novas animações: ir ao Mixamo, fazer upload do GLB, escolher animação, fazer download e juntar no Blender.")
+          else:
+              lines.append(f"- Os nomes dos bones são os definidos no Blender.")
+              lines.append(f"- Para adicionar animações do Mixamo: é necessário fazer upload do GLB no Mixamo e verificar compatibilidade do rig.")
+          lines.append(f"")
+          lines.append(f"---")
+          lines.append(f"")
+          lines.append(f"## 2. Abrir e editar no Blender")
+          lines.append(f"")
+          lines.append(f"### 2.1 Importar o GLB")
+          lines.append(f"")
+          lines.append(f"1. Abrir o Blender (versão 3.6+ ou 4.x recomendada).")
+          lines.append(f"2. `File → Import → glTF 2.0 (.glb/.gltf)`")
+          lines.append(f"3. Seleccionar `assets/models/character/protagonist/The_Soldier.glb`")
+          lines.append(f"4. Configurações de importação recomendadas:")
+          lines.append(f"   - ✅ **Import Textures** — para ver os materiais correctamente")
+          lines.append(f"   - ✅ **Bone Direction** — manter o padrão Blender")
+          lines.append(f"   - ✅ **Guess Original Bind Pose** — evita deformações")
+          lines.append(f"")
+          lines.append(f"Após importar, deves ver:")
+          lines.append(f"- Uma mesh com o personagem")
+          lines.append(f"- Um Armature com **{d['bone_count']} bones**")
+          lines.append(f"- {d['animation_count']} actions na lista de animações (Dope Sheet → Action Editor)")
+          lines.append(f"")
+          lines.append(f"### 2.2 Navegar nas animações no Blender")
+          lines.append(f"")
+          lines.append(f"1. Seleccionar o Armature.")
+          lines.append(f"2. Abrir o **Dope Sheet** (barra inferior → `Dope Sheet`).")
+          lines.append(f"3. Mudar modo para **Action Editor**.")
+          lines.append(f"4. No menu dropdown de actions, ver todas as {d['animation_count']} animações.")
+          lines.append(f"5. Seleccionar uma action para a pré-visualizar com `Spacebar`.")
+          lines.append(f"")
+          lines.append(f"**As {d['animation_count']} animações disponíveis são:**")
+          lines.append(f"")
+          for name in sorted(anim_names):
+              lines.append(f"- `{name}`")
+          lines.append(f"")
+          lines.append(f"### 2.3 Editar uma animação existente")
+          lines.append(f"")
+          lines.append(f"1. No Action Editor, seleccionar a animação a editar.")
+          lines.append(f"2. Entrar em **Pose Mode** (`Tab` com o Armature seleccionado).")
+          lines.append(f"3. Ir ao frame desejado (barra de tempo inferior).")
+          lines.append(f"4. Seleccionar bones e ajustar a pose.")
+          lines.append(f"5. Pressionar `I` → inserir keyframe (`LocRotScale`).")
+          lines.append(f"6. Repetir para os frames necessários.")
+          lines.append(f"")
+          lines.append(f"⚠️ **Não apagar keyframes de bones que não estás a editar**")
+          lines.append(f"— isso pode fazer a animação perder a pose de outros bones.")
+          lines.append(f"")
+          lines.append(f"### 2.4 Criar uma animação nova no Blender")
+          lines.append(f"")
+          lines.append(f"1. No Action Editor, clicar em **New** (ícone `+`).")
+          lines.append(f"2. Dar um nome descritivo (ex: `Crouch`, `Attack_01`).")
+          lines.append(f"   - Usar nomes simples, sem espaços — ou adicionar o nome à `ANIM_CANDIDATES` no controlador.")
+          lines.append(f"3. Ir ao frame 0, fazer a pose inicial, inserir keyframe.")
+          lines.append(f"4. Ir ao frame final, fazer a pose final, inserir keyframe.")
+          lines.append(f"5. Para animações em loop: a pose do frame 0 e do frame final devem ser iguais.")
+          lines.append(f"")
+          lines.append(f"---")
+          lines.append(f"")
+          lines.append(f"## 3. Adicionar animações via Mixamo")
+          lines.append(f"")
+          lines.append(f"O Mixamo tem centenas de animações prontas que podem ser adicionadas ao personagem.")
+          lines.append(f"")
+          lines.append(f"### 3.1 Processo de download")
+          lines.append(f"")
+          lines.append(f"1. Ir a [https://www.mixamo.com](https://www.mixamo.com)")
+          lines.append(f"2. Fazer upload do `The_Soldier.glb` (botão **Upload Character**).")
+          lines.append(f"3. Escolher a animação desejada no painel lateral.")
+          lines.append(f"4. Ajustar parâmetros (velocidade, amplitude do movimento).")
+          lines.append(f"5. Fazer download com estas configurações:")
+          lines.append(f"   - **Format:** FBX Binary")
+          lines.append(f"   - **Skin:** Without Skin (ou With Skin se for a primeira vez)")
+          lines.append(f"   - **Frames per second:** 30")
+          lines.append(f"   - **Keyframe Reduction:** Uniform")
+          lines.append(f"")
+          lines.append(f"### 3.2 Importar no Blender e juntar ao GLB existente")
+          lines.append(f"")
+          lines.append(f"1. No Blender, com o The_Soldier.glb já importado:")
+          lines.append(f"2. `File → Import → FBX (.fbx)` → seleccionar o FBX do Mixamo.")
+          lines.append(f"3. Um segundo Armature aparecerá na cena.")
+          lines.append(f"4. Copiar a action do Armature Mixamo para o Armature do Soldier:")
+          lines.append(f"   - Seleccionar o Armature Mixamo.")
+          lines.append(f"   - No Action Editor, ver o nome da action (ex: `mixamo.com`).")
+          lines.append(f"   - Seleccionar o Armature do Soldier.")
+          lines.append(f"   - No Action Editor, clicar no dropdown e seleccionar a action importada.")
+          lines.append(f"   - Se funcionar (o personagem anima correctamente): guardar como nova action.")
+          lines.append(f"   - Se não funcionar: os rigs são incompatíveis — usar um addon de retargeting.")
+          lines.append(f"5. Apagar o Armature temporário do Mixamo.")
+          lines.append(f"")
+          lines.append(f"### 3.3 Addon recomendado para retargeting")
+          lines.append(f"")
+          lines.append(f"**Auto-Rig Pro** (pago) ou **Rokoko Retargeting** (gratuito):")
+          lines.append(f"- Blender: `Edit → Preferences → Add-ons → procurar \"Rokoko\"`")
+          lines.append(f"- Permite mapear bones de um Armature para outro automaticamente.")
+          lines.append(f"")
+          lines.append(f"---")
+          lines.append(f"")
+          lines.append(f"## 4. Exportar de volta para o Godot")
+          lines.append(f"")
+          lines.append(f"### 4.1 Exportar GLB do Blender")
+          lines.append(f"")
+          lines.append(f"1. No Blender, seleccionar **todos os objectos** (`A`).")
+          lines.append(f"2. `File → Export → glTF 2.0 (.glb/.gltf)`")
+          lines.append(f"3. Configurações obrigatórias:")
+          lines.append(f"   - **Format:** GLB (Binary)")
+          lines.append(f"   - ✅ **Selected Objects** — apenas os objectos relevantes")
+          lines.append(f"   - ✅ **Apply Modifiers**")
+          lines.append(f"   - ✅ **Include** → Animations → **NLA Tracks** e **Active Actions**")
+          lines.append(f"   - ✅ **Include** → Skinning")
+          lines.append(f"   - ✅ **Include** → Normals")
+          lines.append(f"   - **Path:** `assets/models/character/protagonist/The_Soldier.glb`")
+          lines.append(f"4. Clicar **Export glTF 2.0**.")
+          lines.append(f"")
+          lines.append(f"⚠️ **ATENÇÃO:** Sobrescrever o GLB existente apaga as animações anteriores")
+          lines.append(f"se não estiverem no Blender. Garantir que todas as {d['animation_count']} actions")
+          lines.append(f"estão presentes antes de exportar.")
+          lines.append(f"")
+          lines.append(f"### 4.2 Verificar no Godot após exportação")
+          lines.append(f"")
+          lines.append(f"1. No Godot, o ficheiro é re-importado automaticamente ao detectar mudanças.")
+          lines.append(f"2. Verificar no **FileSystem** que `The_Soldier.glb` não tem ícone de erro.")
+          lines.append(f"3. Abrir uma cena com o personagem e verificar no painel **AnimationPlayer**")
+          lines.append(f"   se as animações novas aparecem.")
+          lines.append(f"4. Se uma animação nova não for detectada pelo controlador:")
+          lines.append(f"   - Ir a `scripts/player_controller.gd`")
+          lines.append(f"   - Adicionar o nome exacto da animação à `ANIM_CANDIDATES`:")
+          lines.append(f"   ```gdscript")
+          lines.append(f"   const ANIM_CANDIDATES : Dictionary = {{")
+          lines.append(f"       \"Crouch\": [\"Crouch\", \"crouch\", \"nome_exacto_do_blender\"],")
+          lines.append(f"   }}")
+          lines.append(f"   ```")
+          lines.append(f"")
+          lines.append(f"---")
+          lines.append(f"")
+          lines.append(f"## 5. Modificar materiais e texturas")
+          lines.append(f"")
+          lines.append(f"### 5.1 No Blender")
+          lines.append(f"")
+          lines.append(f"1. Seleccionar a mesh do personagem.")
+          lines.append(f"2. No painel lateral direito, ir ao separador **Material Properties** (ícone de esfera).")
+          lines.append(f"3. Seleccionar o material a editar (o personagem tem {d['material_count']} material(ais)).")
+          lines.append(f"4. No **Shader Editor**, modificar os nós de material.")
+          lines.append(f"5. Para substituir uma textura:")
+          lines.append(f"   - Encontrar o nó **Image Texture**.")
+          lines.append(f"   - Clicar na imagem → **Open** → seleccionar a nova textura.")
+          lines.append(f"6. Exportar o GLB com `✅ Include → Materials` e `✅ Include → Images`.")
+          lines.append(f"")
+          lines.append(f"### 5.2 Directamente no Godot")
+          lines.append(f"")
+          lines.append(f"1. No FileSystem, clicar no `.glb` → ver os recursos gerados.")
+          lines.append(f"2. Encontrar o material (ficheiro `.tres` ou `.material`).")
+          lines.append(f"3. No Inspector, modificar as propriedades do `StandardMaterial3D`:")
+          lines.append(f"   - `Albedo → Texture` — textura de cor base")
+          lines.append(f"   - `Normal Map → Texture` — textura de normais")
+          lines.append(f"   - `Roughness` e `Metallic` — acabamento da superfície")
+          lines.append(f"4. Guardar o material como um `.tres` externo para não ser sobrescrito")
+          lines.append(f"   ao re-importar o GLB.")
+          lines.append(f"")
+          lines.append(f"---")
+          lines.append(f"")
+          lines.append(f"## 6. Modificar bones — IK e poses")
+          lines.append(f"")
+          lines.append(f"### 6.1 Adicionar IK de pés no Godot")
+          lines.append(f"")
+          lines.append(f"```gdscript")
+          lines.append(f"# Adicionar nó SkeletonIK3D ao Skeleton3D")
+          lines.append(f"# No Inspector:")
+          lines.append(f"#   Root Bone: (bone raiz da perna, ex: LeftUpLeg)")
+          lines.append(f"#   Tip Bone:  (bone do pé, ex: LeftFoot)")
+          lines.append(f"#   Target:    (Node3D no chão, actualizado por raycast)")
+          lines.append(f"")
+          if bone_names:
+              left_foot = next((b for b in bone_names if "foot" in b.lower() and "left" in b.lower()), bone_names[-1])
+              lines.append(f"@onready var ik_left: SkeletonIK3D = $CharacterMesh/.../SkeletonIK3D")
+              lines.append(f"")
+              lines.append(f"func _process(_delta):")
+              lines.append(f"    ik_left.start()")
+          lines.append(f"```")
+          lines.append(f"")
+          lines.append(f"### 6.2 Manipular bones em runtime")
+          lines.append(f"")
+          lines.append(f"```gdscript")
+          lines.append(f"var skel: Skeleton3D = $CharacterMesh/The_Soldier/Armature/Skeleton3D")
+          lines.append(f"")
+          lines.append(f"# Rotacionar um bone (ex: girar a cabeça para olhar para algo)")
+          if bone_names:
+              head_bone = next((b for b in bone_names if "head" in b.lower()), bone_names[0])
+              lines.append(f"var head_idx: int = skel.find_bone(\"{head_bone}\")")
+          lines.append(f"var current: Transform3D = skel.get_bone_pose(head_idx)")
+          lines.append(f"skel.set_bone_pose_rotation(head_idx, current.basis.rotated(Vector3.UP, 0.3))")
+          lines.append(f"```")
+          lines.append(f"")
+          lines.append(f"---")
+          lines.append(f"")
+          lines.append(f"## 7. Checklist de modificação segura")
+          lines.append(f"")
+          lines.append(f"Antes de qualquer modificação, verificar estes pontos:")
+          lines.append(f"")
+          lines.append(f"- [ ] Fazer backup do `The_Soldier.glb` original antes de sobrescrever.")
+          lines.append(f"- [ ] Garantir que todas as animações existentes estão no Blender antes de exportar.")
+          lines.append(f"- [ ] Após exportar, executar o workflow **Audit Soldier GLB** para confirmar integridade.")
+          lines.append(f"- [ ] Verificar que o número de animações no novo GLB é ≥ {d['animation_count']}.")
+          lines.append(f"- [ ] Testar no Godot: Idle, Walk, Run, Jump funcionam correctamente.")
+          lines.append(f"- [ ] Em Android: testar com build de debug antes de publicar.")
+          lines.append(f"- [ ] Se adicionou nova animação: adicionar o nome à `ANIM_CANDIDATES` no controlador.")
+          lines.append(f"")
+          lines.append(f"---")
+          lines.append(f"")
+          lines.append(f"## 8. Referências rápidas")
+          lines.append(f"")
+          lines.append(f"| Recurso | Localização |")
+          lines.append(f"| --- | --- |")
+          lines.append(f"| Personagem GLB | `assets/models/character/protagonist/The_Soldier.glb` |")
+          lines.append(f"| Controlador do jogador | `scripts/player_controller.gd` |")
+          lines.append(f"| Cena do jogador | `scenes/player.tscn` |")
+          lines.append(f"| Cena principal | `scenes/main.tscn` |")
+          lines.append(f"| Workflow de auditoria | `.github/workflows/audit-soldier-glb.yml` |")
+          lines.append(f"| Workflow de validação | `.github/workflows/validate-phase31.yml` |")
+          lines.append(f"| Mixamo | https://www.mixamo.com |")
+          lines.append(f"| Blender glTF docs | https://docs.blender.org/manual/en/latest/addons/import_export/scene_gltf2.html |")
+          lines.append(f"| Godot AnimationPlayer | https://docs.godotengine.org/en/stable/classes/class_animationplayer.html |")
+          lines.append(f"| Godot Skeleton3D | https://docs.godotengine.org/en/stable/classes/class_skeleton3d.html |")
+
+          with open("/tmp/SOLDIER_MODIFICATION_GUIDE.md", "w", encoding="utf-8") as f:
+              f.write("\n".join(lines))
+
+          print(f"✓ SOLDIER_MODIFICATION_GUIDE.md gerado ({len(lines)} linhas)")
+          PYEOF
+
+      # ── 7. MOSTRAR PREVIEW NOS LOGS ───────────────────────────────
+      - name: Preview dos ficheiros gerados
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  SOLDIER_REFERENCE.md — primeiras 60 linhas"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          head -60 /tmp/SOLDIER_REFERENCE.md
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  SOLDIER_MODIFICATION_GUIDE.md — primeiras 60 linhas"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          head -60 /tmp/SOLDIER_MODIFICATION_GUIDE.md
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  TAMANHOS"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          wc -l /tmp/SOLDIER_REFERENCE.md /tmp/SOLDIER_MODIFICATION_GUIDE.md
+          wc -c /tmp/SOLDIER_REFERENCE.md /tmp/SOLDIER_MODIFICATION_GUIDE.md
+
+      # ── 8. COMMIT AO REPO (opcional) ──────────────────────────────
+      - name: Commit dos ficheiros ao repositório (opcional)
+        if: github.event.inputs.commit_docs == 'true'
+        run: |
+          cp /tmp/SOLDIER_REFERENCE.md docs/SOLDIER_REFERENCE.md
+          cp /tmp/SOLDIER_MODIFICATION_GUIDE.md docs/SOLDIER_MODIFICATION_GUIDE.md
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          mkdir -p docs
+          git add docs/SOLDIER_REFERENCE.md docs/SOLDIER_MODIFICATION_GUIDE.md
+
+          if git diff --cached --quiet; then
+            echo "Sem alterações para commitar (ficheiros idênticos)."
+          else
+            git commit -m "docs: actualizar SOLDIER_REFERENCE e SOLDIER_MODIFICATION_GUIDE [auto]"
+            git push
+            echo "✓ Ficheiros committed e pushed para o repositório."
+          fi
+
+      # ── 9. UPLOAD COMO ARTIFACT ────────────────────────────────────
+      - name: Upload dos documentos como artefacto
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soldier-character-docs
+          path: |
+            /tmp/SOLDIER_REFERENCE.md
+            /tmp/SOLDIER_MODIFICATION_GUIDE.md
+          retention-days: 90
+          if-no-files-found: error
+
+      # ── 10. SUMÁRIO FINAL ─────────────────────────────────────────
+      - name: Sumário final
+        if: always()
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  AXEV CRIME — Documentação do Personagem"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "  Ficheiros gerados:"
+          echo "  • SOLDIER_REFERENCE.md"
+          echo "    Referência técnica completa: skeleton, animações (nomes exactos),"
+          echo "    integração Godot, fluxo de estados, root motion, bones."
+          echo ""
+          echo "  • SOLDIER_MODIFICATION_GUIDE.md"
+          echo "    Guia de modificação: Blender, Mixamo, re-exportação,"
+          echo "    materiais, bones em runtime, checklist de segurança."
+          echo ""
+          echo "  Download: separador Actions → este workflow → Artifacts"
+          echo "  → soldier-character-docs"
+          echo ""
+          if [[ "${{ github.event.inputs.commit_docs }}" == "true" ]]; then
+            echo "  Committed em: docs/SOLDIER_REFERENCE.md"
+            echo "             e: docs/SOLDIER_MODIFICATION_GUIDE.md"
+          else
+            echo "  Para commitar ao repo: re-executar com 'commit_docs = true'"
+          fi
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

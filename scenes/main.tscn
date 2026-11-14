@@ -1,39 +1,29 @@
-[gd_scene load_steps=6 format=3 uid="uid://main_scene"]
+[gd_scene load_steps=3 format=3 uid="uid://main_v31"]
 
-[ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
-
-[sub_resource type="Environment" id="Environment_1"]
-background_mode = 1
-background_color = Color(0.15, 0.15, 0.2, 1)
-
-[sub_resource type="BoxShape3D" id="BoxShape3D_1"]
-size = Vector3(40, 1, 40)
-
-[sub_resource type="BoxMesh" id="BoxMesh_1"]
-size = Vector3(40, 1, 40)
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_1"]
-albedo_color = Color(0.3, 0.3, 0.35, 1)
+[ext_resource type="Script"      path="res://scripts/main.gd"       id="1_mg"]
+[ext_resource type="PackedScene" path="res://scenes/player.tscn"    id="2_pl"]
 
 [node name="Main" type="Node3D"]
-script = ExtResource("1_main")
+script = ExtResource("1_mg")
 
+; ── Iluminação ────────────────────────────────────────────────────────────────
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
-environment = SubResource("Environment_1")
+environment = Environment.new()
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
-transform = Transform3D(0.707, -0.5, 0.5, 0, 0.707, 0.707, -0.707, -0.5, 0.5, 0, 10, 0)
-light_energy = 1.2
-shadow_enabled = true
+transform = Transform3D(0.866, -0.433, 0.25,   0, 0.5, 0.866,   -0.5, -0.75, 0.433,   0, 10, 0)
+light_energy    = 1.2
+shadow_enabled  = true
 
+; ── Chão básico ───────────────────────────────────────────────────────────────
 [node name="Ground" type="StaticBody3D" parent="."]
 
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Ground"]
-shape = SubResource("BoxShape3D_1")
-
 [node name="MeshInstance3D" type="MeshInstance3D" parent="Ground"]
-mesh = SubResource("BoxMesh_1")
-surface_material_override/0 = SubResource("StandardMaterial3D_1")
+mesh = PlaneMesh.new()
 
-[node name="SpawnPoint" type="Node3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Ground"]
+shape = WorldBoundaryShape3D.new()
+
+; ── Jogador ───────────────────────────────────────────────────────────────────
+[node name="Player" parent="." instance=ExtResource("2_pl")]
+transform = Transform3D(1, 0, 0,  0, 1, 0,  0, 0, 1,  0, 1, 0)

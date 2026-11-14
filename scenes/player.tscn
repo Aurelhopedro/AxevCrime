@@ -1,79 +1,23 @@
-[gd_scene load_steps=5 format=3 uid="uid://player_scene"]
+[gd_scene load_steps=4 format=3 uid="uid://player_v31"]
 
-[ext_resource type="Script" path="res://scripts/player_controller.gd" id="1_player"]
-[ext_resource type="PackedScene" path="res://scenes/touch_ui.tscn" id="2_touch_ui"]
-[ext_resource type="PackedScene" path="res://assets/models/character/protagonist/The_Soldier.glb" id="3_soldier"]
-
-[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_1"]
-radius = 0.4
-height = 1.8
-
-;; ==========================================================================
-;; AXEV CRIME — Player Scene  (Fase 3.1 — The_Soldier.glb + animações)
-;; ==========================================================================
-;;
-;; HIERARQUIA:
-;;
-;; Player (CharacterBody3D)
-;; ├── CollisionShape3D        — radius=0.4, height=1.8 — NÃO MEXER
-;; ├── CharacterMesh (Node3D)  — pivot de rotação; recebe rotação do controlador
-;; │   └── The_Soldier         — The_Soldier.glb instanciado
-;; │       └── Armature (Node3D)
-;; │           ├── Skeleton3D
-;; │           │   └── [MeshInstances com 19 materiais]
-;; │           └── AnimationPlayer — 117 animações, detectado por _find_ap_deep()
-;; ├── AnimationRoot (Node3D)  — reservado; não usado com GLB com anims incorporadas
-;; ├── CameraPivot (Node3D)
-;; │   └── Camera3D
-;; └── TouchUI (instância)
-;;
-;; ESCALA DO MODELO:
-;;   A escala correcta depende das unidades de exportação do GLB.
-;;
-;;   CASO A — Modelo em METROS (~1.8m de altura):
-;;     The_Soldier scale = (1, 1, 1)   ← valor actual
-;;     The_Soldier origin.y = 0.0      ← origem já nos pés do modelo
-;;
-;;   CASO B — Modelo em CENTÍMETROS (~180 unidades de altura, Mixamo):
-;;     The_Soldier scale = (0.01, 0.01, 0.01)
-;;     The_Soldier origin.y = 0.0
-;;
-;;   CollisionShape3D: transform.y=0.9 coloca o centro da cápsula a 0.9m
-;;   acima do Player — base da cápsula fica a y=0, coincidente com os pés.
-;;
-;; ANIMAÇÕES (player_controller.gd v3):
-;;   O controlador detecta o AnimationPlayer automaticamente e resolve
-;;   os nomes reais das animações em runtime via ANIM_CANDIDATES.
-;;   Ver Output do Godot após iniciar o jogo para a lista completa.
-;;
-;; PRESERVADO:
-;;   CollisionShape3D, CameraPivot, Camera3D, TouchUI, scripts
-;; ==========================================================================
+[ext_resource type="Script" path="res://scripts/player_controller.gd" id="1_pc"]
+[ext_resource type="Script" path="res://scripts/touch_controller.gd"  id="2_tc"]
+[ext_resource type="PackedScene" path="res://scenes/touch_ui.tscn"    id="3_ui"]
 
 [node name="Player" type="CharacterBody3D"]
-script = ExtResource("1_player")
+script = ExtResource("1_pc")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
-shape = SubResource("CapsuleShape3D_1")
-
-[node name="CharacterMesh" type="Node3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
-
-;; The_Soldier.glb instanciado.
-;; origin.y = 0.0: origem do GLB já está nos pés do modelo.
-;; scale = (1,1,1): assume modelo em metros.
-;; Se o personagem aparecer gigante no editor, mudar para (0.01, 0.01, 0.01).
-[node name="The_Soldier" parent="CharacterMesh" instance=ExtResource("3_soldier")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
-
-[node name="AnimationRoot" type="Node3D" parent="."]
-visible = false
+shape = CapsuleShape3D.new()
 
 [node name="CameraPivot" type="Node3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
+transform = Transform3D(1, 0, 0,  0, 1, 0,  0, 0, 1,  0, 1.65, 0)
 
 [node name="Camera3D" type="Camera3D" parent="CameraPivot"]
-transform = Transform3D(1, 0, 0, 0, 0.966, 0.259, 0, -0.259, 0.966, 0, 0, 3)
+transform = Transform3D(1, 0, 0,  0, 0.966, 0.259,  0, -0.259, 0.966,  0, 0, 3.5)
 
-[node name="TouchUI" parent="." instance=ExtResource("2_touch_ui")]
+[node name="CharacterMesh" type="Node3D" parent="."]
+
+[node name="AnimationRoot" type="Node3D" parent="."]
+
+[node name="TouchUI" parent="." instance=ExtResource("3_ui")]

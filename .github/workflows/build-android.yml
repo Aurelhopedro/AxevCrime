@@ -1,4 +1,4 @@
-name: Build Android APK (Debug)
+name: Build Android APK + PCK (Debug)
 
 # ── EXECUÇÃO APENAS MANUAL ─────────────────────────────────────────
 on:
@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   build-android:
-    name: Godot 4.3 — Android Debug APK
+    name: Godot 4.3 — Android Debug APK + PCK
     runs-on: ubuntu-22.04
     timeout-minutes: 60
 
@@ -258,10 +258,10 @@ jobs:
           tail -60 /tmp/godot_android_export.log
 
           if [[ "$status" -ne 0 ]]; then
-            echo "::error::Exportação Android falhou (exit $status)"
+            echo "::error::Exportação Android APK falhou (exit $status)"
             exit 1
           fi
-          echo "Exportação Android concluída."
+          echo "Exportação APK concluída."
 
       # ── 14. VERIFICAR APK ──────────────────────────────────────────
       - name: Verificar APK gerado
@@ -288,12 +288,72 @@ jobs:
           fi
 
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "  APK VERIFICADO COM SUCESSO"
+          echo "  APK VERIFICADO"
           echo "  Tamanho: $(du -sh "$APK" | cut -f1)"
           echo "  Magic:   $HEX_MAGIC (ZIP válido)"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-      # ── 15. UPLOAD APK COMO ARTIFACT DESCARREGÁVEL ─────────────────
+      # ── 15. EXPORTAR PCK (arquivo Godot) ───────────────────────────
+      # O PCK é o pacote de recursos do jogo — útil para:
+      #   • Distribuir actualizações de conteúdo sem reinstalar o APK
+      #   • Testar o projecto no Godot Editor noutra máquina
+      #   • Futuras plataformas (PC, iOS) que partilham os mesmos assets
+      - name: Exportar PCK (arquivo Godot)
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          mkdir -p build/pck
+
+          timeout 480s godot \
+            --headless \
+            --path "$GITHUB_WORKSPACE" \
+            --export-pack "Android" \
+            "build/pck/axev_crime.pck" \
+            2>&1 | tee /tmp/godot_pck_export.log
+          status=${PIPESTATUS[0]}
+
+          echo "--- PCK export log (últimas 30 linhas) ---"
+          tail -30 /tmp/godot_pck_export.log
+
+          if [[ "$status" -ne 0 ]]; then
+            echo "::error::Exportação PCK falhou (exit $status)"
+            exit 1
+          fi
+          echo "Exportação PCK concluída."
+
+      # ── 16. VERIFICAR PCK ──────────────────────────────────────────
+      - name: Verificar PCK gerado
+        run: |
+          set -euo pipefail
+          PCK="build/pck/axev_crime.pck"
+
+          if [[ ! -f "$PCK" ]]; then
+            echo "::error::PCK não encontrado: $PCK"
+            ls -lh build/pck/ 2>/dev/null || echo "(directório vazio)"
+            exit 1
+          fi
+
+          PCK_SIZE=$(wc -c < "$PCK")
+          if [[ "$PCK_SIZE" -lt 100 ]]; then
+            echo "::error::PCK tem apenas $PCK_SIZE bytes — corrompido"
+            exit 1
+          fi
+
+          # Magic bytes de um PCK Godot 4: 47 44 50 43 = "GDPC"
+          HEX_MAGIC=$(xxd -l 4 -p "$PCK")
+          if [[ "$HEX_MAGIC" == "47445043" ]]; then
+            echo "✓ Magic GDPC — PCK Godot válido"
+          else
+            echo "::warning::Magic bytes inesperados: $HEX_MAGIC (pode ainda ser válido)"
+          fi
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  PCK VERIFICADO"
+          echo "  Tamanho: $(du -sh "$PCK" | cut -f1)"
+          echo "  Magic:   $HEX_MAGIC"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      # ── 17. UPLOAD APK COMO ARTIFACT ───────────────────────────────
       - name: Upload APK como artifact
         uses: actions/upload-artifact@v4
         with:
@@ -302,7 +362,16 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
-      # ── 16. LOGS SEMPRE GUARDADOS ───────────────────────────────────
+      # ── 18. UPLOAD PCK COMO ARTIFACT ───────────────────────────────
+      - name: Upload PCK como artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: axev-crime-godot-pck
+          path: build/pck/axev_crime.pck
+          retention-days: 14
+          if-no-files-found: error
+
+      # ── 19. LOGS SEMPRE GUARDADOS ───────────────────────────────────
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -311,11 +380,12 @@ jobs:
           path: |
             /tmp/godot_import.log
             /tmp/godot_android_export.log
+            /tmp/godot_pck_export.log
             /tmp/sdkmanager_install.log
           retention-days: 7
           if-no-files-found: ignore
 
-      # ── 17. SUMÁRIO ────────────────────────────────────────────────
+      # ── 20. SUMÁRIO ────────────────────────────────────────────────
       - name: Sumário da exportação
         if: always()
         run: |
@@ -323,9 +393,15 @@ jobs:
           echo "  AXEV CRIME — Android Debug Build"
           echo "  Personagem: The_Soldier.glb"
           echo "  Godot:  4.3-stable | SDK: API 34 | NDK: $ANDROID_NDK_ROOT"
+          echo ""
           if [[ -f "build/android/axev_crime.apk" ]]; then
-            echo "  RESULTADO: ✓ APK GERADO ($(du -sh build/android/axev_crime.apk | cut -f1))"
+            echo "  APK : ✓ GERADO  ($(du -sh build/android/axev_crime.apk | cut -f1))"
           else
-            echo "  RESULTADO: ✗ APK NÃO GERADO"
+            echo "  APK : ✗ NÃO GERADO"
+          fi
+          if [[ -f "build/pck/axev_crime.pck" ]]; then
+            echo "  PCK : ✓ GERADO  ($(du -sh build/pck/axev_crime.pck | cut -f1))"
+          else
+            echo "  PCK : ✗ NÃO GERADO"
           fi
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

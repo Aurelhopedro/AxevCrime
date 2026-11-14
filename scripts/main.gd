@@ -1,19 +1,40 @@
 extends Node3D
 
-## AXEV CRIME — Main Scene
-## Entry point for the game world. Spawns player and sets up environment.
+## =============================================================================
+## AXEV CRIME — Main  (bootstrap da cena de jogo)
+## =============================================================================
+##
+## Responsabilidades:
+##   • Bloquear a orientação do ecrã em modo landscape no Android.
+##   • Ocultar/mostrar a TouchUI consoante a plataforma.
+##   • Ponto de entrada para futuras transições de fase
+##     (mundo, missões, estado global).
+##
+## Nada de lógica de movimento aqui — isso fica em player_controller.gd.
+## =============================================================================
 
-const PlayerScene := preload("res://scenes/player.tscn")
+@onready var player : CharacterBody3D = $Player
 
 func _ready() -> void:
-	_spawn_player()
+	var is_mobile : bool = OS.has_feature("android") \
+		or OS.has_feature("ios") \
+		or OS.has_feature("mobile")
 
-func _spawn_player() -> void:
-	var spawn : Node3D = get_node_or_null("SpawnPoint")
-	if spawn == null:
-		push_error("SpawnPoint node not found in Main scene.")
-		return
+	if is_mobile:
+		# Bloquear landscape para evitar rotação acidental
+		DisplayServer.screen_set_orientation(DisplayServer.SCREEN_LANDSCAPE)
+	else:
+		# Desktop — esconder UI táctil (opcional; o TouchController já verifica)
+		var touch_ui : CanvasLayer = player.get_node_or_null("TouchUI")
+		if touch_ui:
+			touch_ui.visible = false
+		# Capturar rato
+		Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
 
-	var player : CharacterBody3D = PlayerScene.instantiate()
-	add_child(player)
-	player.global_position = spawn.global_position
+func _unhandled_input(event: InputEvent) -> void:
+	# Escape no desktop para libertar o cursor
+	if event.is_action_pressed("ui_cancel"):
+		if Input.get_mouse_mode() == Input.MOUSE_MODE_CAPTURED:
+			Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+		else:
+			Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)

@@ -1,17 +1,27 @@
 {
   "name": "AXEV CRIME",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "engine": "Godot 4.3",
   "platform": "Android",
   "language": "GDScript",
   "type": "3D Open World — Crime / Mystery",
-  "status": "Phase 1 — Foundation",
+  "status": "Phase 1 Complete — Foundation",
   "repository": "https://github.com/Aurelhopedro/AxevCrime",
+  "scenes": {
+    "main":     "scenes/main.tscn   — World3D, luz, chão, spawn do Player",
+    "player":   "scenes/player.tscn — CharacterBody3D, CameraPivot, CharacterMesh, TouchUI",
+    "touch_ui": "scenes/touch_ui.tscn — CanvasLayer(10), joystick virtual, zona câmara, botões"
+  },
+  "scripts": {
+    "main.gd":               "Bootstrap: orientação landscape, mouse capture",
+    "player_controller.gd":  "Física 3D, animações, input teclado/touch",
+    "touch_controller.gd":   "Joystick virtual, arrastar câmara, botões JUMP/RUN/INTERACT"
+  },
   "phases": {
-    "1": "Foundation — project structure, player controller, CI validation",
+    "1": "Foundation — COMPLETA: estrutura, player, touch UI, CI",
     "2": "World — terrain, props, navigation mesh",
-    "3": "Vehicle — basic driving physics",
-    "4": "Investigation — clues, inventory, dialogue stubs",
-    "5": "Android Export — APK build and signing"
+    "3": "Vehicle — física de condução básica",
+    "4": "Investigation — pistas, inventário, diálogos stub",
+    "5": "Android Export — APK build e assinatura"
   }
 }
